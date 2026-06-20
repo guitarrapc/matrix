@@ -189,6 +189,11 @@ internal static class EngineConstants
     internal const double LutBrightScale = 1.18;
     /// <summary>&lt; 1 lifts mid-trail vs tip; tip still reaches 0.</summary>
     internal const double TrailEnvelopeGamma = 0.58;
+    /// <summary>Protect the first trail cells from the rain wave starting at a dark phase.</summary>
+    internal const int NearHeadBrightnessFloorCells = 5;
+    internal const float NearHeadBrightnessFloor = 0.72f;
+    /// <summary>Rain shimmer can dim a trail, but should not erase it before the envelope fades out.</summary>
+    internal const float RainWaveMinimum = 0.42f;
     /// <summary>Cap simultaneous stream births so cohorts do not die in sync (~2–3s).</summary>
     internal const int MaxSpawnsPerFrame = 4;
     /// <summary>Consecutive ticks with the same size before applying a terminal resize.</summary>
@@ -1432,7 +1437,9 @@ internal sealed class MatrixEngine : IDisposable
                 cell.Glyph = _pool.Pick(_rng);
 
             var wave = RainBrightness.Compute(y, _height, _simTime, column);
+            wave = MathF.Max(wave, NearHeadWaveFloor(dist));
             var envelope = TrailEnvelope(dist, column.TrailLength);
+            wave = EngineConstants.RainWaveMinimum + wave * (1f - EngineConstants.RainWaveMinimum);
             var brightness = wave * envelope;
             var cursorBoost = (byte)(dist == 0 ? 1 : 0);
             var brightnessByte = (byte)Math.Clamp((int)(brightness * 255), 0, 255);
@@ -1450,6 +1457,17 @@ internal sealed class MatrixEngine : IDisposable
             return 1f;
         var linear = (float)(trailLength - 1 - distanceFromHead) / (trailLength - 1);
         return MathF.Pow(linear, (float)EngineConstants.TrailEnvelopeGamma);
+    }
+
+    private static float NearHeadWaveFloor(int distanceFromHead)
+    {
+        if (distanceFromHead <= 0)
+            return 1f;
+        if (distanceFromHead >= EngineConstants.NearHeadBrightnessFloorCells)
+            return 0f;
+
+        var t = distanceFromHead / (float)EngineConstants.NearHeadBrightnessFloorCells;
+        return EngineConstants.NearHeadBrightnessFloor * (1f - t * t);
     }
 
     private void SetDisplayGlyph(int x, int y, char glyph, byte brightness, byte cursorBoost)
