@@ -156,7 +156,7 @@ internal static class EngineConstants
     internal const double DefaultDensity = 0.55;
     internal const double DefaultMovieDensity = 0.7;
     internal const int DensityActiveBasePercent = 55;
-    internal const int DensitySpawnBasePercent = 6;
+    internal const int DensitySpawnBasePercent = 10;
     internal const double MovieDensityBoost = 1.5;
     internal const double TrailMinHeightFraction = 0.30;
     internal const double TrailMaxHeightFraction = 0.90;

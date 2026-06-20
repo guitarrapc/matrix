@@ -63,6 +63,8 @@ True Color terminals use 24-bit ANSI; others fall back to the nearest 16-color n
 | Fall speed | 1–2 cells/frame per column |
 | Glyph mutation | ~35% per frame per visible stream cell |
 | Movie density | effective density × **1.5** (cap 1.0) |
+| Initial active columns | effective density × **55%** at start / resize |
+| Spawn (inactive columns) | effective density × **10%** per frame |
 
 ---
 
