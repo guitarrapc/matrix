@@ -11,6 +11,11 @@ permissions:
 
 jobs:
   publish:
+    name: Publish ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -39,60 +44,105 @@ jobs:
             rid: osx-x64
             artifact: matrix-osx-amd64
             ext: tar.gz
-
-    runs-on: ${{ matrix.os }}
-
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-dotnet@v4
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          dotnet-version: "10.0.x"
-
+          persist-credentials: false
+      - name: Set up .NET
+        uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5.3.0
+        with:
+          dotnet-version: 10.0.x
       - name: Publish Native AOT
         shell: bash
         run: |
-          dotnet publish matrix.cs \
-            -c Release \
-            -r ${{ matrix.rid }} \
-            --self-contained true \
-            -p:PublishSingleFile=true \
-            -p:PublishAot=true \
-            -o publish
-
-      - name: Package (Unix)
-        if: matrix.ext == 'tar.gz'
+          artifact_dir="$GITHUB_WORKSPACE/release/${{ matrix.rid }}"
+          mkdir -p "$artifact_dir"
+          dotnet publish matrix.cs -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None -o "$artifact_dir"
+      - name: Package release assets (Linux/macOS)
+        if: ${{ runner.os != 'Windows' }}
         shell: bash
         run: |
-          cd publish
-          tar -czf "../${{ matrix.artifact }}.tar.gz" matrix
-          cd ..
+          artifact_dir="$GITHUB_WORKSPACE/release/${{ matrix.rid }}"
+          archive_path="$GITHUB_WORKSPACE/${{ matrix.artifact }}.tar.gz"
+          checksum_path="$archive_path.sha256"
 
-      - name: Package (Windows)
-        if: matrix.ext == 'zip'
+          tar -czf "$archive_path" -C "$artifact_dir" .
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            checksum_value=$(sha256sum "$archive_path" | awk '{print $1}')
+          else
+            checksum_value=$(shasum -a 256 "$archive_path" | awk '{print $1}')
+          fi
+
+          printf '%s  %s\n' "$checksum_value" "$(basename "$archive_path")" > "$checksum_path"
+
+          test -f "$archive_path"
+          test -f "$checksum_path"
+
+      - name: Package release assets (Windows)
+        if: ${{ runner.os == 'Windows' }}
         shell: pwsh
         run: |
-          Compress-Archive -Path publish/matrix.exe -DestinationPath "${{ matrix.artifact }}.zip"
+          $artifactDir = "$env:GITHUB_WORKSPACE\release\${{ matrix.rid }}"
+          $archivePath = "$env:GITHUB_WORKSPACE\${{ matrix.artifact }}.zip"
+          $checksumPath = "$archivePath.sha256"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          Compress-Archive -Path "$artifactDir\*" -DestinationPath $archivePath
+
+          $hash = (Get-FileHash $archivePath -Algorithm SHA256).Hash.ToLower()
+          "$hash  ${{ matrix.artifact }}.zip" | Set-Content $checksumPath -NoNewline
+
+          if (-not (Test-Path $archivePath)) { exit 1 }
+          if (-not (Test-Path $checksumPath)) { exit 1 }
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.${{ matrix.ext }}
+          path: |
+            ${{ github.workspace }}/${{ matrix.artifact }}.${{ matrix.ext }}
+            ${{ github.workspace }}/${{ matrix.artifact }}.${{ matrix.ext }}.sha256
+          if-no-files-found: error
 
   release:
+    name: Create GitHub Release
     needs: publish
     runs-on: ubuntu-24.04
-    if: startsWith(github.ref, 'refs/tags/')
-
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          path: artifacts
-          merge-multiple: true
+          path: artifacts/
+
+      - name: Collect release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find artifacts/ -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \) -exec cp {} release/ \;
+
+          echo "### Release assets" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          find release/ -maxdepth 1 -type f | sort | xargs -n 1 basename >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attest build provenance (SLSA)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: |
+            release/*.tar.gz
+            release/*.zip
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/**/*
-          generate_release_notes: true
+        shell: bash
+        run: |
+          gh release create "$TAG" release/* --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag --draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}

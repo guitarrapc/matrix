@@ -1,6 +1,6 @@
 # matrix
 
-Terminal-based green code rain.
+Terminal-based green code rain. Matrix is something I always wanted to have on my terminal, so I made it. It supports true-color shaders and custom color patterns, and it runs on Windows, Linux, and macOS.
 
 ![](./image_shader.png)
 
