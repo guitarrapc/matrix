@@ -155,9 +155,11 @@ internal static class EngineConstants
     internal const int MaxSpeed = 2;
     internal const double DefaultDensity = 0.55;
     internal const double DefaultMovieDensity = 0.7;
-    internal const int DensityActiveBasePercent = 55;
-    internal const int DensitySpawnBasePercent = 10;
+    internal const int DensityActiveBasePercent = 80;
     internal const double MovieDensityBoost = 1.5;
+    /// <summary>Average cells a stream travels before deactivating ≈ factor × height (see spawn equilibrium).</summary>
+    internal const double StreamLifetimeHeightFactor = 1.85;
+    internal const double AvgFallSpeedCells = (MinSpeed + MaxSpeed) / 2.0;
     internal const double TrailMinHeightFraction = 0.30;
     internal const double TrailMaxHeightFraction = 0.90;
     internal const int MinTrailCells = 10;
@@ -983,8 +985,9 @@ internal sealed class MatrixEngine
     private readonly GlyphPool _pool;
     private readonly AnsiPalette _palette;
     private readonly bool _wideColumns;
-    private readonly int _activeChancePercent;
-    private readonly int _spawnChancePercent;
+    private readonly double _effectiveDensity;
+    private int _activeChancePercent;
+    private int _spawnChancePercent;
     private readonly Random _rng = new();
 
     private Cell[] _grid = [];
@@ -1005,10 +1008,31 @@ internal sealed class MatrixEngine
         if (_wideColumns)
             effectiveDensity = Math.Min(1.0, effectiveDensity * EngineConstants.MovieDensityBoost);
 
-        _activeChancePercent = Math.Min(100, (int)(effectiveDensity * EngineConstants.DensityActiveBasePercent));
-        _spawnChancePercent = Math.Min(100, (int)(effectiveDensity * EngineConstants.DensitySpawnBasePercent));
-
+        _effectiveDensity = effectiveDensity;
         Resize();
+    }
+
+    private void UpdateDensityChances()
+    {
+        _activeChancePercent = Math.Min(100, (int)(_effectiveDensity * EngineConstants.DensityActiveBasePercent));
+        _spawnChancePercent = ComputeEquilibriumSpawnPercent(_activeChancePercent, _height);
+    }
+
+    /// <summary>Per-frame spawn % so steady active fraction ≈ initial active chance (births = deaths).</summary>
+    private static int ComputeEquilibriumSpawnPercent(int activeChancePercent, int height)
+    {
+        if (activeChancePercent <= 0)
+            return 0;
+        if (activeChancePercent >= 100)
+            return 100;
+
+        var targetFraction = activeChancePercent / 100.0;
+        var avgLifetimeFrames = Math.Max(
+            1.0,
+            (EngineConstants.StreamLifetimeHeightFactor * height - 2) / EngineConstants.AvgFallSpeedCells);
+        var deathRate = 1.0 / avgLifetimeFrames;
+        var spawnFraction = targetFraction * deathRate / (1.0 - targetFraction);
+        return Math.Min(100, (int)Math.Round(spawnFraction * 100));
     }
 
     internal void Tick()
@@ -1064,6 +1088,7 @@ internal sealed class MatrixEngine
 
         _width = newWidth;
         _height = newHeight;
+        UpdateDensityChances();
         _grid = ArrayPool<Cell>.Shared.Rent(_width * _height);
         _columns = ArrayPool<ColumnState>.Shared.Rent(_width);
         Array.Clear(_grid, 0, _width * _height);

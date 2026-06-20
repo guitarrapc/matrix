@@ -63,8 +63,8 @@ True Color terminals use 24-bit ANSI; others fall back to the nearest 16-color n
 | Fall speed | 1–2 cells/frame per column |
 | Glyph mutation | ~35% per frame per visible stream cell |
 | Movie density | effective density × **1.5** (cap 1.0) |
-| Initial active columns | effective density × **55%** at start / resize |
-| Spawn (inactive columns) | effective density × **10%** per frame |
+| Initial active columns | effective density × **80%** at start / resize (`density 1.0` → **80%** of stream columns) |
+| Spawn (inactive columns) | **equilibrium** — per-frame % derived from terminal height so steady active fraction ≈ initial active chance |
 
 ---
 
@@ -171,6 +171,7 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 - **Decision:** even anchor columns, full-width glyphs only, Continuation cell for the second display cell.
 - **Pitfall:** emitting a **space** on Continuation cells caused cursor drift and crooked lines — Continuation must write **zero bytes**.
 - **Glyph mix:** katakana-only was too plain vs the film. Expanded to full-width digits, five kanji (`日三二一十`), and symbols — still **80% katakana** so the mix reads as “occasional” not “character soup.” Half-width katakana was rejected (would forfeit the two-cell grid or reintroduce width mixing). Standalone `゛` `゜` are not guaranteed two cells in Unicode; kept as a trial.
+- **Spawn rate vs density:** a fixed `density × N%` spawn under-filled the screen after the first stream cycle. Steady-state spawn is now computed from average stream lifetime (~terminal height) so the long-run active column fraction matches the initial `density × 80%` target.
 
 ### Color model evolution
 
