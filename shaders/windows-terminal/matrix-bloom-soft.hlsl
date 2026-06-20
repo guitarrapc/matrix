@@ -18,16 +18,11 @@ cbuffer PixelShaderSettings {
     float4 Background;
 };
 
-static const float BloomRadius = 1.55;
-static const float BloomThreshold = 0.18;
-static const float BloomKnee = 0.10;
-static const float BloomIntensity = 2.3;
-static const float BloomSaturation = 1.45;
-static const float BaseOpacity = 0.74;
-static const float Contrast = 1.18;
-static const float HeadThreshold = 0.58;
-static const float HeadKnee = 0.34;
-static const float3 HeadTint = float3(0.78, 1.0, 0.78);
+static const float BloomRadius = 2.5;
+static const float BloomThreshold = 0.06;
+static const float BloomKnee = 0.12;
+static const float BloomIntensity = 2.2;
+static const float BloomSaturation = 1.3;
 static const float3 BloomTint = float3(0.188, 1.0, 0.345); // #30FF58
 static const float3 LumWeights = float3(0.299, 0.587, 0.114);
 
@@ -55,17 +50,11 @@ float Luminance(float3 rgb)
     return dot(rgb, LumWeights);
 }
 
-float3 CompositeTerminal(float2 tex)
-{
-    float4 sample = shaderTexture.Sample(samplerState, tex);
-    return lerp(Background.rgb, sample.rgb, sample.a);
-}
-
 float4 main(float4 pos : SV_POSITION, float2 tex : TEXCOORD) : SV_TARGET
 {
-    float3 base = CompositeTerminal(tex);
-    float2 safeResolution = max(Resolution, float2(1.0, 1.0));
-    float2 sampleStep = float2(1.414 * BloomRadius, 1.414 * BloomRadius) / safeResolution;
+    float4 sample = shaderTexture.Sample(samplerState, tex);
+    float3 base = lerp(Background.rgb, sample.rgb, sample.a);
+    float2 sampleStep = float2(1.414 * BloomRadius, 1.414 * BloomRadius) / Resolution;
 
     float3 bloom = float3(0.0, 0.0, 0.0);
     [unroll]
@@ -73,34 +62,15 @@ float4 main(float4 pos : SV_POSITION, float2 tex : TEXCOORD) : SV_TARGET
     {
         float3 s = Samples[i];
         float2 sampleUv = clamp(tex + s.xy * sampleStep, 0.0, 1.0);
-        float3 neighborRgb = CompositeTerminal(sampleUv);
+        float4 neighbor = shaderTexture.Sample(samplerState, sampleUv);
+        float3 neighborRgb = lerp(Background.rgb, neighbor.rgb, neighbor.a);
         float l = Luminance(neighborRgb);
         float knee = max(BloomKnee, 0.0001);
         float mask = smoothstep(BloomThreshold, BloomThreshold + knee, l);
         float3 gray = l.xxx;
         float3 saturated = lerp(gray, neighborRgb, BloomSaturation);
-        bloom += saturated * BloomTint * (l * mask * s.z * 0.16);
+        bloom += saturated * BloomTint * (l * mask * s.z * 0.2);
     }
 
-    float2 px = 1.0 / safeResolution;
-    float3 horizontalSmear =
-        CompositeTerminal(clamp(tex + float2(px.x * 1.5, 0.0), 0.0, 1.0)) +
-        CompositeTerminal(clamp(tex - float2(px.x * 1.5, 0.0), 0.0, 1.0));
-    bloom += horizontalSmear * BloomTint * 0.028;
-
-    float baseLum = Luminance(base);
-    float headMask = smoothstep(HeadThreshold, HeadThreshold + HeadKnee, baseLum);
-    float3 filmBase = pow(saturate(base), Contrast) * BaseOpacity;
-    filmBase = lerp(filmBase, HeadTint, headMask * 0.38);
-
-    float scanline = 0.92 + 0.08 * smoothstep(0.35, 0.95, frac(pos.y * 0.5));
-    float flicker = 0.975 + 0.025 * sin(Time * 38.0 + pos.y * 0.047);
-    float2 centered = tex * 2.0 - 1.0;
-    float vignette = 1.0 - smoothstep(0.25, 1.45, dot(centered, centered));
-
-    float3 color = filmBase + bloom * BloomIntensity;
-    color *= scanline * flicker;
-    color *= 0.82 + 0.18 * vignette;
-
-    return float4(saturate(color), 1.0);
+    return float4(base + bloom * BloomIntensity, 1.0);
 }
