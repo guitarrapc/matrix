@@ -176,6 +176,9 @@ internal static class EngineConstants
     internal const int LutTailFadeEnd = 38;
     internal const int LutDimIndex = 64;
     internal const int LutBrightIndex = 191;
+    internal const double LutBrightScale = 1.18;
+    /// <summary>&lt; 1 lifts mid-trail vs tip; tip still reaches 0.</summary>
+    internal const double TrailEnvelopeGamma = 0.78;
 }
 
 internal readonly struct Rgb(byte r, byte g, byte b)
@@ -642,12 +645,13 @@ internal sealed class BrightnessPalette
     private static void BuildLut(Span<Rgb> lut, Rgb head, Rgb bright, Rgb dim, Rgb bg)
     {
         _ = head;
-        var hotBright = HotBright(bright);
+        var vividBright = ScaleRgb(bright, EngineConstants.LutBrightScale);
+        var hotBright = HotBright(vividBright);
         var keyframes = new (int index, Rgb rgb)[]
         {
             (EngineConstants.LutTailFadeEnd, dim),
             (EngineConstants.LutDimIndex, dim),
-            (EngineConstants.LutBrightIndex, bright),
+            (EngineConstants.LutBrightIndex, vividBright),
             (255, hotBright),
         };
 
@@ -666,9 +670,9 @@ internal sealed class BrightnessPalette
 
     private static Rgb HotBright(Rgb bright) =>
         new(
-            (byte)Math.Min(255, bright.R + 30),
-            (byte)Math.Min(255, bright.G + 40),
-            (byte)Math.Min(255, bright.B + 15));
+            (byte)Math.Min(255, bright.R + 45),
+            (byte)Math.Min(255, bright.G + 65),
+            (byte)Math.Min(255, bright.B + 25));
 
     private static Rgb SampleKeyframes((int index, Rgb rgb)[] keyframes, int i)
     {
@@ -1218,12 +1222,13 @@ internal sealed class MatrixEngine
         }
     }
 
-    /// <summary>1 at Head, 0 at trail tip — ensures the top of every stream fades to black.</summary>
+    /// <summary>1 at Head, 0 at trail tip. Gamma &lt; 1 keeps mid-trail brighter while the tip still fades out.</summary>
     private static float TrailEnvelope(int distanceFromHead, int trailLength)
     {
         if (trailLength <= 1)
             return 1f;
-        return (float)(trailLength - 1 - distanceFromHead) / (trailLength - 1);
+        var linear = (float)(trailLength - 1 - distanceFromHead) / (trailLength - 1);
+        return MathF.Pow(linear, (float)EngineConstants.TrailEnvelopeGamma);
     }
 
     private void SetDisplayGlyph(int x, int y, char glyph, byte brightness, byte cursorBoost)

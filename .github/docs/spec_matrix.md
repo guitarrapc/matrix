@@ -41,8 +41,8 @@ Wide glyphs use an **anchor** cell plus a **Continuation** cell to the right. Co
 Color is driven by the Matrix rain wave **and** a trail envelope:
 
 - **Wave** — per-column pulse and raindrop truncation (reference `getRainBrightness`).
-- **Trail envelope** — linear fade from Head (**1.0**) to trail tip (**0.0**). Final brightness = wave × envelope so every stream’s **top always dims toward black**, matching the film.
-- **Palette:** four CLI colors (`--bg`, `--dim`, `--bright`, `--head`) define a brightness→color map. The LUT tops out at vivid green (`--bright`); **`--head` is applied only on the stream Head** (white bloom), not across high wave brightness.
+- **Trail envelope** — fade from Head (**1.0**) to trail tip (**0.0**); gamma **0.78** lifts mid-trail brightness while the tip still reaches black. Final brightness = wave × envelope.
+- **Palette:** four CLI colors define a brightness→color map. LUT high end is boosted (`--bright` × 1.18, hotter peak); **`--head` is applied only on the stream Head** (white bloom), not across high wave brightness.
 - **Cursor highlight:** the Head cell only (`dist == 0`); not raindrop wave edges.
 - **Dither** on brightness before palette lookup.
 
