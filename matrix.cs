@@ -1,6 +1,6 @@
 ﻿#:sdk Microsoft.NET.Sdk
 #:property TargetFramework=net10.0
-#:property Version=1.0.0
+#:property Version=1.0.1
 #:property Nullable=enable
 #:property ImplicitUsings=enable
 #:property PublishAot=true
@@ -14,7 +14,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 
-const string VersionString = "1.0.0";
+const string VersionString = "1.0.1";
 
 if (TryHandleEarlyExit(args, VersionString))
     return;
