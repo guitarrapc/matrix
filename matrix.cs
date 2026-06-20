@@ -99,9 +99,11 @@ try
             break;
 
         engine.Tick();
+        var frameStart = Stopwatch.GetTimestamp();
         engine.Render(stdout);
-
-        Thread.Sleep(EngineConstants.FrameDelayMs);
+        var frameMs = (Stopwatch.GetTimestamp() - frameStart) * 1000.0 / Stopwatch.Frequency;
+        var sleepMs = Math.Max(0, EngineConstants.FrameDelayMs - (int)Math.Round(frameMs));
+        Thread.Sleep(sleepMs);
     }
 }
 finally
@@ -179,6 +181,10 @@ internal static class EngineConstants
     internal const double LutBrightScale = 1.18;
     /// <summary>&lt; 1 lifts mid-trail vs tip; tip still reaches 0.</summary>
     internal const double TrailEnvelopeGamma = 0.78;
+    /// <summary>Cap simultaneous stream births so cohorts do not die in sync (~2–3s).</summary>
+    internal const int MaxSpawnsPerFrame = 4;
+    /// <summary>Consecutive ticks with the same size before applying a terminal resize.</summary>
+    internal const int ResizeStableFrames = 4;
 }
 
 internal readonly struct Rgb(byte r, byte g, byte b)
@@ -731,17 +737,21 @@ internal sealed class BrightnessPalette
 
 internal sealed class AnsiPalette
 {
+    private readonly byte[] _syncStart = "\u001b[?2026h"u8.ToArray();
+    private readonly byte[] _syncEnd = "\u001b[?2026l"u8.ToArray();
     private readonly byte[] _home = "\u001b[H"u8.ToArray();
+    private readonly byte[] _clearEol = "\u001b[K"u8.ToArray();
     private readonly byte[] _bgRowPrefix;
+    private readonly byte[] _rowFgReset;
     private readonly byte[] _space = " "u8.ToArray();
-    private readonly byte[] _newline = "\n"u8.ToArray();
     private readonly BrightnessPalette _palette;
     private readonly bool _trueColor;
     private readonly double _cursorIntensity;
 
-    private AnsiPalette(byte[] bgRowPrefix, BrightnessPalette palette, bool trueColor, double cursorIntensity)
+    private AnsiPalette(byte[] bgRowPrefix, byte[] rowFgReset, BrightnessPalette palette, bool trueColor, double cursorIntensity)
     {
         _bgRowPrefix = bgRowPrefix;
+        _rowFgReset = rowFgReset;
         _palette = palette;
         _trueColor = trueColor;
         _cursorIntensity = cursorIntensity;
@@ -755,11 +765,16 @@ internal sealed class AnsiPalette
             ResolveRgb(colors.Dim),
             ResolveRgb(colors.Background));
 
+        var bgRgb = ResolveRgb(colors.Background);
+        var bgNamed = ResolveNamed(colors.Background);
         var bgPrefix = trueColor
-            ? BuildTrueColorBgPrefix(ResolveRgb(colors.Background))
-            : BuildAnsi16BgPrefix(ResolveNamed(colors.Background));
+            ? BuildTrueColorBgPrefix(bgRgb)
+            : BuildAnsi16BgPrefix(bgNamed);
+        var rowFgReset = trueColor
+            ? BuildTrueColorFgPrefix(bgRgb)
+            : BuildAnsi16FgPrefix(bgNamed);
 
-        return new AnsiPalette(bgPrefix, palette, trueColor, cursorIntensity);
+        return new AnsiPalette(bgPrefix, rowFgReset, palette, trueColor, cursorIntensity);
     }
 
     private static Rgb ResolveRgb(ColorValue color) => color.Rgb;
@@ -772,6 +787,14 @@ internal sealed class AnsiPalette
     }
 
     private static byte[] BuildTrueColorBgPrefix(Rgb rgb) => BuildTrueColorSequence(isBackground: true, rgb);
+
+    private static byte[] BuildTrueColorFgPrefix(Rgb rgb) => BuildTrueColorSequence(isBackground: false, rgb);
+
+    private static byte[] BuildAnsi16FgPrefix(ConsoleColor16 color)
+    {
+        var code = Ansi16FgCode(color);
+        return BuildAnsi16Sequence(code);
+    }
 
     private static byte[] BuildTrueColorSequence(bool isBackground, Rgb rgb)
     {
@@ -847,14 +870,24 @@ internal sealed class AnsiPalette
     internal void WriteFrame(Stream stdout, ReadOnlySpan<Cell> grid, int width, int height, byte[] buffer, ulong frameNumber)
     {
         var pos = 0;
+        AppendBytes(buffer, ref pos, _syncStart);
         AppendBytes(buffer, ref pos, _home);
         Span<byte> fgScratch = stackalloc byte[32];
         var cursorAddend = BrightnessPalette.ScaleRgb(_palette.HeadColor, _cursorIntensity);
 
         for (var y = 0; y < height; y++)
         {
+            if (y > 0)
+                AppendCupRow1(buffer, ref pos, y + 1);
+
             AppendBytes(buffer, ref pos, _bgRowPrefix);
+            AppendBytes(buffer, ref pos, _rowFgReset);
+
             var row = y * width;
+            var lastFg16 = -1;
+            Rgb lastFgRgb = default;
+            var hasLastFgRgb = false;
+
             for (var x = 0; x < width; x++)
             {
                 ref readonly var cell = ref grid[row + x];
@@ -874,21 +907,46 @@ internal sealed class AnsiPalette
                 if (cell.CursorBoost != 0)
                     rgb = BrightnessPalette.AddClamped(rgb, cursorAddend);
 
-                int fgLen;
                 if (_trueColor)
-                    WriteTrueColorSequence(fgScratch, isBackground: false, rgb, out fgLen);
+                {
+                    if (!hasLastFgRgb || rgb.R != lastFgRgb.R || rgb.G != lastFgRgb.G || rgb.B != lastFgRgb.B)
+                    {
+                        WriteTrueColorSequence(fgScratch, isBackground: false, rgb, out var fgLen);
+                        AppendBytes(buffer, ref pos, fgScratch[..fgLen]);
+                        lastFgRgb = rgb;
+                        hasLastFgRgb = true;
+                    }
+                }
                 else
-                    WriteAnsi16Sequence(fgScratch, Ansi16FgCode(ColorParser.NearestNamed(rgb)), out fgLen);
+                {
+                    var fgCode = Ansi16FgCode(ColorParser.NearestNamed(rgb));
+                    if (fgCode != lastFg16)
+                    {
+                        WriteAnsi16Sequence(fgScratch, fgCode, out var fgLen);
+                        AppendBytes(buffer, ref pos, fgScratch[..fgLen]);
+                        lastFg16 = fgCode;
+                    }
+                }
 
-                AppendBytes(buffer, ref pos, fgScratch[..fgLen]);
                 AppendCharUtf8(buffer, ref pos, cell.Glyph);
             }
 
-            AppendBytes(buffer, ref pos, _newline);
+            AppendBytes(buffer, ref pos, _clearEol);
         }
 
+        AppendBytes(buffer, ref pos, _syncEnd);
         stdout.Write(buffer.AsSpan(0, pos));
         stdout.Flush();
+    }
+
+    private static void AppendCupRow1(byte[] buffer, ref int pos, int row)
+    {
+        buffer[pos++] = 0x1B;
+        buffer[pos++] = (byte)'[';
+        pos += AppendDecimal(buffer.AsSpan(pos), row);
+        buffer[pos++] = (byte)';';
+        buffer[pos++] = (byte)'1';
+        buffer[pos++] = (byte)'H';
     }
 
     private static float Dither(int x, int y, ulong frame)
@@ -1028,6 +1086,10 @@ internal sealed class MatrixEngine
     private int _height;
     private double _simTime;
     private ulong _frameNumber;
+    private int _pendingResizeWidth;
+    private int _pendingResizeHeight;
+    private int _pendingResizeStable;
+    private int _spawnsThisFrame;
 
     internal MatrixEngine(GlyphPool pool, AnsiPalette palette, double density)
     {
@@ -1131,8 +1193,21 @@ internal sealed class MatrixEngine
             height = 1;
 
         if (width != _width || height != _height)
-            Resize(width, height);
+        {
+            if (width == _pendingResizeWidth && height == _pendingResizeHeight)
+                _pendingResizeStable++;
+            else
+            {
+                _pendingResizeWidth = width;
+                _pendingResizeHeight = height;
+                _pendingResizeStable = 1;
+            }
 
+            if (_pendingResizeStable >= EngineConstants.ResizeStableFrames)
+                Resize(width, height);
+        }
+
+        _spawnsThisFrame = 0;
         RefreshAdaptiveSpawnChance();
 
         for (var x = 0; x < _width; x++)
@@ -1152,7 +1227,7 @@ internal sealed class MatrixEngine
 
     internal void Render(Stream stdout)
     {
-        var needed = _width * _height * 64 + 64;
+        var needed = _width * _height * 72 + _height * 24 + 96;
         if (_renderBuffer.Length < needed)
         {
             if (_renderBuffer.Length > 0)
@@ -1176,6 +1251,9 @@ internal sealed class MatrixEngine
 
         _width = newWidth;
         _height = newHeight;
+        _pendingResizeWidth = newWidth;
+        _pendingResizeHeight = newHeight;
+        _pendingResizeStable = EngineConstants.ResizeStableFrames;
         UpdateDensityChances();
         _grid = ArrayPool<Cell>.Shared.Rent(_width * _height);
         _columns = ArrayPool<ColumnState>.Shared.Rent(_width);
@@ -1198,8 +1276,12 @@ internal sealed class MatrixEngine
         ref var column = ref _columns[x];
         if (!column.Active)
         {
-            if (RollPercent(_spawnChancePercent))
+            if (_spawnsThisFrame < EngineConstants.MaxSpawnsPerFrame &&
+                RollPercent(_spawnChancePercent))
+            {
                 ActivateColumn(x);
+                _spawnsThisFrame++;
+            }
             return;
         }
 
@@ -1318,7 +1400,7 @@ internal sealed class MatrixEngine
         _columns[x] = new ColumnState
         {
             Active = true,
-            HeadY = -_rng.Next(0, Math.Max(1, _height / 2)),
+            HeadY = -_rng.Next(0, Math.Max(1, _height)),
             Speed = speed,
             TrailLength = _rng.Next(minTrail, maxTrail + 1),
             TimeOffset = RainBrightness.ColumnTimeOffset(x),

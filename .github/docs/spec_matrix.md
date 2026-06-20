@@ -51,7 +51,8 @@ True Color terminals use 24-bit ANSI; others fall back to the nearest 16-color n
 ### Presentation
 
 - ~**14 FPS**; alternate screen; hidden cursor; restore terminal on exit (no farewell message).
-- Recalculate grid on resize when the environment allows.
+- Recalculate grid on resize when the environment allows (stable size for several consecutive frames).
+- Full-frame redraw uses synchronized output when the terminal accepts it; avoid `\n`-chained full-screen updates on slow integrated terminals.
 
 ### Tuning (defaults)
 
@@ -176,6 +177,13 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 - **Glyph mix:** katakana-only was too plain vs the film. Expanded to full-width digits, five kanji (`日三二一十`), and symbols — still **80% katakana** so the mix reads as “occasional” not “character soup.” Half-width katakana was rejected (would forfeit the two-cell grid or reintroduce width mixing). Standalone `゛` `゜` are not guaranteed two cells in Unicode; kept as a trial.
 - **Spawn rate vs density:** fixed per-frame spawn could not match variable stream lifetimes (random trail length, speed, staggered deaths). Baseline spawn uses a height-based estimate with **headroom** at target; each frame, if active streams are **below** `density × 90%`, spawn **increases** to close the gap within ~0.2s. New streams also spawn with **longer trails** when shortfall is high — column count alone does not fix “thin” visuals when each trail is short or faded at the top.
 
+### VS Code integrated terminal — periodic stutter (movie mode)
+
+- **Symptom:** rain looks one row short; the whole screen lags behind, catches up, then repeats about every **2–3 seconds**; **all columns** glitch together. Starts fine for the first few seconds. Windows Terminal is unaffected.
+- **Tried:** half-width single-cell movie fallback when True Color is off — treated as a static wide-char layout mismatch. **Did not fix it** (user reverted).
+- **Actual cause:** frame-level throughput, not per-column glyph width. At startup most streams share birth time; they die together after roughly `height × 1.55 / fall speed` frames (~2–3s at 14 FPS). Adaptive spawn can recreate **cohorts** that die in sync. As the screen fills, almost every glyph emits its own SGR — frame size spikes. VS Code’s integrated terminal **drops or batches** frames; skipped frames look like vertical skips and global lag, then a catch-up burst.
+- **Decision:** decorrelate stream lifetimes (stagger `HeadY` over full terminal height; cap **4 spawns per frame**); shrink and stabilize frames (deduplicate SGR, reset foreground per row, position rows with `CUP` + clear-to-EOL instead of `\n` chains, wrap output in synchronized output `?2026`); debounce resize; adaptive sleep so simulation does not outrun a slow renderer.
+
 ### Color model evolution
 
 | Stage | Approach | Outcome |
@@ -200,3 +208,4 @@ These are behavioral constraints, easy to get wrong in a top-origin terminal:
 - Unix raw input: Linux and macOS need **separate** `termios` layouts (`c_cc` size and flag width differ).
 - True Color gate stays **conservative** — 256-color `TERM` ≠ 24-bit.
 - Hot path: pre-built ANSI prefixes, `ArrayPool` for grid/buffer, one `Stream.Write` + `Flush` per frame; palette and glyph pools built once at startup.
+- Integrated terminals (notably VS Code): deduplicate SGR, row `CUP` + EL, synchronized output `?2026`, spawn cap, and adaptive frame sleep — see **Lessons Learned → VS Code stutter**.
