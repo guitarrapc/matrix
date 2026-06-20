@@ -1,2 +1,3 @@
 - ttyないときになんかだせないかな。scentakeでとりたい...
 - --shader-bloom autoでどんなシェーダーでもinsencityが変わるの微妙...?
+- hex colorが使えないときのフォールバックって true colorがいいのですが今どうなってます? true color使えないときのフォールバックってasciiでしょうが、hex -> true color -> 16 color palette -> asciiの順でフォールバックするようにしたいです。
