@@ -67,10 +67,10 @@ At render time, Fade maps through **four CLI colors** in three linear segments:
 
 | Fade range (`t`) | Interpolation |
 |---|---|
-| `t = 0` | `--head` with intensity boost |
-| `t ≤ 0.06` | boosted `--head` → `--bright` (ease-out near head) |
-| `t ≤ 0.38` | `--bright` → `--dim` |
-| `t ≤ 1.00` | `--dim` → `--bg` (cubic ease-in; long tail fade) |
+| `t ≤ 0.06` | `--head` (bloom) → hot bright |
+| `t ≤ 0.20` | hot bright → boosted `--bright` |
+| `t ≤ 0.85` | `--bright` → `--dim` (long vivid green trail) |
+| `t ≤ 1.00` | `--dim` → black via **hue-preserving scale** (last ~15% only; avoids gray midtones) |
 
 **True Color:** interpolated RGB as 24-bit ANSI. **16-color fallback:** interpolate then map to the nearest named color.
 
@@ -92,7 +92,7 @@ Within an active stream, **Dim → Empty** occurs only when the cell leaves the 
 | `--density` | **0.0–1.0**, default **0.55** (see below) |
 | Trail length | Per stream at spawn: **height × 0.15 … height × 0.90** (minimum 4 cells), random |
 | Fall speed | 1–2 cells per frame (random per column); entire stream shifts by this amount |
-| Glyph mutation | ~8% chance per frame per visible cell in stream |
+| Glyph mutation | ~35% chance per frame per visible cell in stream |
 | Movie density boost | Effective density **× 1.5** (capped at 1.0) to offset even-column spacing |
 
 **Density** scales both initial active columns and spawn rate:
@@ -184,8 +184,8 @@ Hex is the primary representation; named colors are accepted so users can specif
 |---|---|
 | `--bg` | `#000000` |
 | `--head` | `#FFFFFF` |
-| `--bright` | `#00FF41` |
-| `--dim` | `#008F11` |
+| `--bright` | `#30FF58` |
+| `--dim` | `#00AA1C` |
 
 Unspecified color options use these defaults.
 
@@ -326,4 +326,4 @@ Archives use `.tar.gz` on Unix-like platforms and `.zip` on Windows.
 - **Vertical motion must be explicit in the spec:** the film reads as straight-line falls because each stream moves down as one contiguous segment. An early design treated **Dim → Empty** as high per-frame probability anywhere in the column; that produced scattered, flickering cells and did **not** look like Matrix rain. **Black belongs mostly between columns**, not inside active trails. The visual spec was revised; animation now **shifts each column down as a unit** and assigns Bright/Dim by distance from the Head.
 - **Terminal cell width ≠ one code unit in movie mode:** katakana is **full-width (two terminal cells)**; half-width ASCII is one cell. Placing both in the same logical column breaks vertical alignment, and adjacent streams collide when a wide glyph spans into the next column. Movie mode uses **even column indices**, **full-width glyphs only**, and a **Continuation** display cell whose render output is empty. Earlier fixes that cleared odd columns but still **printed a space** there caused cursor drift and crooked lines; the display-cell grid removes that spurious output.
 - **Discrete Head/Bright/Dim states were too coarse for the film look:** a **Fade** byte plus piecewise RGB interpolation across `--head` / `--bright` / `--dim` / `--bg` better matches gradual trail falloff. Sixteen-color terminals use the same Fade curve with nearest-color quantization.
-- **Tail fade needs a long dim→background segment:** a cubic ease on the upper ~62% of the trail keeps characters visible as dark green longer before melting into black; the head uses a short boosted zone (`t ≤ 0.06`) so the leading glyph pops against the trail.
+- **Tail fade needs a long vivid section:** bright-to-dim runs over ~85% of the trail; only the **last ~15%** scales toward black. Mid-trail darkening used a separate “dark green” stop that read as **gray** on some displays — **hue-preserving RGB scale** (`color × (1−u)`) replaces lerping through muddy midtones.

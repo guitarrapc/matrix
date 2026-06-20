@@ -150,7 +150,7 @@ internal static class EngineConstants
 {
     internal const int TargetFps = 14;
     internal const int FrameDelayMs = 1000 / TargetFps;
-    internal const int GlyphMutationChance = 8;
+    internal const int GlyphMutationChance = 35;
     internal const int MinSpeed = 1;
     internal const int MaxSpeed = 2;
     internal const double DefaultDensity = 0.55;
@@ -160,9 +160,6 @@ internal static class EngineConstants
     internal const double TrailMinHeightFraction = 0.15;
     internal const double TrailMaxHeightFraction = 0.90;
     internal const int MinTrailCells = 4;
-    internal const double FadeSegment1End = 0.06;
-    internal const double FadeSegment2End = 0.38;
-    internal const double HeadIntensityBoost = 1.28;
 }
 
 internal readonly struct Rgb(byte r, byte g, byte b)
@@ -370,8 +367,8 @@ internal readonly struct ColorOptions(
 
     internal static readonly ColorValue DefaultBackground = new(new Rgb(0, 0, 0));
     internal static readonly ColorValue DefaultHead = new(new Rgb(255, 255, 255));
-    internal static readonly ColorValue DefaultBright = new(new Rgb(0, 255, 65));
-    internal static readonly ColorValue DefaultDim = new(new Rgb(0, 143, 17));
+    internal static readonly ColorValue DefaultBright = new(new Rgb(48, 255, 88));
+    internal static readonly ColorValue DefaultDim = new(new Rgb(0, 170, 28));
 
     internal ColorValue Background { get; } = background;
     internal ColorValue Head { get; } = head;
@@ -575,48 +572,74 @@ internal static class TerminalCapabilities
     private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 }
 
-internal sealed class ColorGradient(Rgb head, Rgb bright, Rgb dim, Rgb bg)
+internal sealed class ColorGradient
 {
-    private readonly Rgb _head = head;
-    private readonly Rgb _bright = bright;
-    private readonly Rgb _dim = dim;
-    private readonly Rgb _bg = bg;
+    private const double TailFadeStart = 0.85;
+    private const double TailFadeLength = 1.0 - TailFadeStart;
+
+    private readonly Rgb _head;
+    private readonly Rgb _hotBright;
+    private readonly Rgb _bright;
+    private readonly Rgb _dim;
+    private readonly Rgb _bg;
+
+    internal ColorGradient(Rgb head, Rgb bright, Rgb dim, Rgb bg)
+    {
+        _head = BloomHead(head);
+        _hotBright = LerpRgb(bright, _head, 0.38);
+        _bright = BoostGreen(bright, 1.22);
+        _dim = dim;
+        _bg = bg;
+    }
 
     internal Rgb Sample(byte fade)
     {
-        if (fade == 0)
-            return Intensify(_head);
-
         var t = fade / 255.0;
-        if (t <= EngineConstants.FadeSegment1End)
-        {
-            var u = t / EngineConstants.FadeSegment1End;
-            return Lerp(Intensify(_head), _bright, u * u);
-        }
+        if (t <= 0.06)
+            return LerpRgb(_head, _hotBright, SmoothStep(t / 0.06));
+        if (t <= 0.20)
+            return LerpRgb(_hotBright, _bright, SmoothStep((t - 0.06) / 0.14));
+        if (t <= TailFadeStart)
+            return LerpRgb(_bright, _dim, SmoothStep((t - 0.20) / (TailFadeStart - 0.20)));
 
-        if (t <= EngineConstants.FadeSegment2End)
-        {
-            var u = (t - EngineConstants.FadeSegment1End) / (EngineConstants.FadeSegment2End - EngineConstants.FadeSegment1End);
-            return Lerp(_bright, _dim, u);
-        }
-
-        var tail = (t - EngineConstants.FadeSegment2End) / (1.0 - EngineConstants.FadeSegment2End);
-        tail *= tail * tail;
-        return Lerp(_dim, _bg, tail);
+        var u = SmoothStep((t - TailFadeStart) / TailFadeLength);
+        return FadeToBlack(_dim, u);
     }
 
+    /// <summary>Fade by scaling RGB toward zero — preserves green hue, avoids muddy gray midtones.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private Rgb Intensify(Rgb color)
+    private static Rgb FadeToBlack(Rgb color, double amount)
     {
-        var boost = EngineConstants.HeadIntensityBoost;
+        var keep = 1.0 - Math.Clamp(amount, 0, 1);
         return new Rgb(
-            (byte)Math.Min(255, color.R * boost),
-            (byte)Math.Min(255, color.G * boost),
-            (byte)Math.Min(255, color.B * boost));
+            (byte)(color.R * keep),
+            (byte)(color.G * keep),
+            (byte)(color.B * keep));
+    }
+
+    private static Rgb BloomHead(Rgb head)
+    {
+        if (head.R > 240 && head.G > 240 && head.B > 240)
+            return new Rgb(255, 255, 255);
+        return BoostGreen(head, 1.35);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Rgb Lerp(Rgb from, Rgb to, double t)
+    private static Rgb BoostGreen(Rgb color, double factor) =>
+        new(
+            (byte)Math.Min(255, color.R * factor),
+            (byte)Math.Min(255, color.G * factor),
+            (byte)Math.Min(255, color.B * factor));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static double SmoothStep(double t)
+    {
+        t = Math.Clamp(t, 0, 1);
+        return t * t * (3 - 2 * t);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Rgb LerpRgb(Rgb from, Rgb to, double t)
     {
         t = Math.Clamp(t, 0, 1);
         return new Rgb(
@@ -1308,7 +1331,7 @@ Density:
 
 Colors:
   Hex (#RGB or #RRGGBB) or 16-color names (black, green, darkgreen, ...).
-  Defaults: --bg #000000 --head #FFFFFF --bright #00FF41 --dim #008F11
+  Defaults: --bg #000000 --head #FFFFFF --bright #30FF58 --dim #00AA1C
 
 Examples:
   matrix
