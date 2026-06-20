@@ -967,13 +967,15 @@ internal sealed class GlyphPool
     private readonly string _chars;
     private readonly char _singleChar;
     private readonly bool _single;
+    private readonly GlyphMode _mode;
     internal readonly bool RequiresWideColumns;
 
-    private GlyphPool(string chars, char singleChar, bool single, bool requiresWideColumns)
+    private GlyphPool(string chars, char singleChar, bool single, GlyphMode mode, bool requiresWideColumns)
     {
         _chars = chars;
         _singleChar = singleChar;
         _single = single;
+        _mode = mode;
         RequiresWideColumns = requiresWideColumns;
     }
 
@@ -982,12 +984,12 @@ internal sealed class GlyphPool
         switch (mode)
         {
             case GlyphMode.Single:
-                return new GlyphPool(string.Empty, singleChar, true, requiresWideColumns: false);
+                return new GlyphPool(string.Empty, singleChar, true, GlyphMode.Single, requiresWideColumns: false);
             case GlyphMode.Movie:
                 EnsureUtf8();
-                return new GlyphPool(MovieStreamChars, '\0', false, requiresWideColumns: true);
+                return new GlyphPool(MovieKatakanaChars, '\0', false, GlyphMode.Movie, requiresWideColumns: true);
             default:
-                return new GlyphPool(AsciiMatrixChars, '\0', false, requiresWideColumns: false);
+                return new GlyphPool(AsciiMatrixChars, '\0', false, GlyphMode.AsciiMatrix, requiresWideColumns: false);
         }
     }
 
@@ -1007,14 +1009,35 @@ internal sealed class GlyphPool
             throw new InvalidOperationException("movie mode requires a UTF-8 capable terminal");
     }
 
-    internal char Pick(Random rng) =>
-        _single ? _singleChar : _chars[rng.Next(_chars.Length)];
+    internal char Pick(Random rng)
+    {
+        if (_single)
+            return _singleChar;
+        if (_mode == GlyphMode.Movie)
+            return PickMovie(rng);
+        return _chars[rng.Next(_chars.Length)];
+    }
+
+    private static char PickMovie(Random rng)
+    {
+        var roll = rng.Next(1000);
+        if (roll < 800)
+            return MovieKatakanaChars[rng.Next(MovieKatakanaChars.Length)];
+        if (roll < 970)
+            return rng.Next(100) < 80
+                ? MovieDigitChars[rng.Next(MovieDigitChars.Length)]
+                : MovieKanjiChars[rng.Next(MovieKanjiChars.Length)];
+        return MovieSymbolChars[rng.Next(MovieSymbolChars.Length)];
+    }
 
     private const string AsciiMatrixChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@#$%^&*()";
-    // Full-width katakana only — half-width Latin/digits break vertical alignment in terminals.
-    private const string MovieStreamChars =
+    // Movie mode: full-width (two display cells) only — mixed widths break vertical alignment.
+    private const string MovieKatakanaChars =
         "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン" +
         "ガギグゲゴザジズゼゾダヂヅデドバビブベボパピプペポヴヰヱ";
+    private const string MovieDigitChars = "０１２３４５６７８９";
+    private const string MovieKanjiChars = "日三二一十";
+    private const string MovieSymbolChars = "：・．＝＋－＜＞｜゛゜";
 }
 
 internal sealed class MatrixEngine
@@ -1460,7 +1483,7 @@ Duration:
 Modes:
   (default)   ascii-matrix character pool
   --char X    single-character mode
-  --mode movie  katakana-heavy movie pool (UTF-8 terminal required)
+  --mode movie  full-width katakana-heavy pool with digits, kanji, symbols (UTF-8 required)
 
 Density:
   --density     Rain density from 0.0 (sparse) to 1.0 (dense). Default 0.55.

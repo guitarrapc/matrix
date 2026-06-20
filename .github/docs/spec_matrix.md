@@ -71,11 +71,22 @@ True Color terminals use 24-bit ANSI; others fall back to the nearest 16-color n
 |---|---|---|
 | **ascii-matrix** (default) | (none) | Mixed ASCII letters, digits, symbols |
 | **single** | `--char X` | One user character |
-| **movie** | `--mode movie` | Katakana-centered pool + Latin, digits, symbols |
+| **movie** | `--mode movie` | Full-width katakana-heavy mix (see below) |
 
 `--char` and `--mode movie` together are a fatal error. `--char` wins over other mode flags.
 
-**movie** requires UTF-8 output; no ascii-matrix fallback. Active movie streams use **full-width glyphs on even columns** only.
+**movie** requires UTF-8 output; no ascii-matrix fallback. Active streams use **full-width (two-cell) glyphs on even columns** only — half-width characters are excluded because mixed display widths break vertical alignment.
+
+**movie** glyph mix (weighted random):
+
+| Pool | Contents | Share |
+|---|---|---|
+| Katakana |清音・濁音・半濁音 | **80%** |
+| Digits |全角 `０`–`９` | **13.6%** (uniform) |
+| Kanji |`日` `三` `二` `一` `十` | **3.4%** (uniform) |
+| Symbols |`：` `・` `．` `＝` `＋` `－` `＜` `＞` `｜` `゛` `゜` | **3%** (uniform) |
+
+Within the 17% non-katakana bucket, digits are favored over kanji (80% / 20%). `゛` `゜` and `・` are included tentatively; remove if terminal width misbehaves.
 
 ---
 
@@ -156,6 +167,7 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 - **Result:** broken vertical alignment and column collisions.
 - **Decision:** even anchor columns, full-width glyphs only, Continuation cell for the second display cell.
 - **Pitfall:** emitting a **space** on Continuation cells caused cursor drift and crooked lines — Continuation must write **zero bytes**.
+- **Glyph mix:** katakana-only was too plain vs the film. Expanded to full-width digits, five kanji (`日三二一十`), and symbols — still **80% katakana** so the mix reads as “occasional” not “character soup.” Half-width katakana was rejected (would forfeit the two-cell grid or reintroduce width mixing). Standalone `゛` `゜` are not guaranteed two cells in Unicode; kept as a trial.
 
 ### Color model evolution
 
