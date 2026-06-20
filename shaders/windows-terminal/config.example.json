@@ -1,0 +1,14 @@
+{
+  "keybindings": [
+    {
+      "id": "Terminal.ToggleShaderEffects",
+      "keys": "shift+f10"
+    }
+  ],
+  "profiles": {
+    "defaults": {
+      "startingDirectory": null,
+      "experimental.pixelShaderPath": "matrix-bloom.hlsl"
+    }
+  }
+}

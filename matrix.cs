@@ -1,4 +1,4 @@
-#:sdk Microsoft.NET.Sdk
+﻿#:sdk Microsoft.NET.Sdk
 #:property TargetFramework=net10.0
 #:property Version=1.0.0
 #:property Nullable=enable
@@ -44,11 +44,15 @@ if (Console.IsOutputRedirected)
     Environment.Exit(1);
 }
 
+var terminal = TerminalProfile.Detect();
 var useTrueColor = TerminalCapabilities.EnableVirtualTerminalIfNeeded() && TerminalCapabilities.SupportsTrueColor();
 if (!useTrueColor)
 {
     Console.Error.WriteLine("warning: true color not supported; falling back to 16-color palette");
 }
+
+ShaderBloomSupport.WriteStartupNotes(options, terminal);
+var cursorIntensity = options.ResolveCursorIntensity(terminal);
 
 var keyExitEnabled = !Console.IsInputRedirected;
 if (!keyExitEnabled)
@@ -69,7 +73,7 @@ catch (InvalidOperationException ex)
     return;
 }
 
-var palette = AnsiPalette.Create(options.Colors, useTrueColor, options.CursorIntensity);
+var palette = AnsiPalette.Create(options.Colors, useTrueColor, cursorIntensity);
 using var engine = new MatrixEngine(pool, palette, options.Density, options.Fps);
 var frameDelayMs = 1000.0 / options.Fps;
 
@@ -162,7 +166,7 @@ internal static class EngineConstants
     internal const int DensityActiveBasePercent = 90;
     internal const double MovieDensityBoost = 1.5;
     /// <summary>Average cells a stream travels before deactivating ≈ factor × height (see spawn equilibrium).</summary>
-    internal const double StreamLifetimeHeightFactor = 1.55;
+    internal const double StreamLifetimeHeightFactor = 1.15;
     internal const double AvgFallSpeedCells = (MinSpeed + MaxSpeed) / 2.0;
     /// <summary>Frames to close an active-column deficit when below density target (~0.2s at 14 FPS).</summary>
     internal const int DensityRecoveryFrames = 3;
@@ -177,14 +181,30 @@ internal static class EngineConstants
     internal const double RaindropLength = 0.75;
     internal const double DitherMagnitude = 0.05;
     internal const double DefaultCursorIntensity = 2.5;
-    internal const int LutTailFadeEnd = 38;
+    /// <summary>Head additive bloom when the terminal applies a GPU bloom shader.</summary>
+    internal const double ShaderBloomCursorIntensity = 1.0;
+    internal const int LutTailFadeEnd = 22;
     internal const int LutDimIndex = 64;
     internal const int LutBrightIndex = 191;
     internal const double LutBrightScale = 1.18;
     /// <summary>&lt; 1 lifts mid-trail vs tip; tip still reaches 0.</summary>
-    internal const double TrailEnvelopeGamma = 0.78;
+    internal const double TrailEnvelopeGamma = 0.58;
+    /// <summary>Protect the first trail cells from the rain wave starting at a dark phase.</summary>
+    internal const int NearHeadBrightnessFloorCells = 5;
+    internal const float NearHeadBrightnessFloor = 0.72f;
+    /// <summary>Rain shimmer can dim a trail, but should not erase it before the envelope fades out.</summary>
+    internal const float RainWaveMinimum = 0.42f;
     /// <summary>Cap simultaneous stream births so cohorts do not die in sync (~2–3s).</summary>
     internal const int MaxSpawnsPerFrame = 4;
+    internal const int MaxStreamsPerColumn = 2;
+    /// <summary>Begin considering same-column respawn once the head has crossed this screen fraction.</summary>
+    internal const double RecycleStartHeadFraction = 0.50;
+    /// <summary>Screen coverage below this fraction strongly favors immediate same-column respawn.</summary>
+    internal const double RecycleSparseVisibleFraction = 0.28;
+    /// <summary>Screen coverage above this fraction delays respawn until the head is off-screen.</summary>
+    internal const double RecycleDenseVisibleFraction = 0.72;
+    /// <summary>Maximum top-entry delay for recycled streams; initial streams keep the wider stagger.</summary>
+    internal const double RecycleInitialDelayHeightFraction = 0.22;
     /// <summary>Consecutive ticks with the same size before applying a terminal resize.</summary>
     internal const int ResizeStableFrames = 4;
 }
@@ -237,6 +257,13 @@ internal readonly struct ColorValue
     }
 }
 
+internal enum ShaderBloomMode
+{
+    Auto,
+    On,
+    Off,
+}
+
 internal sealed class CliOptions
 {
     internal GlyphMode Mode { get; private init; } = GlyphMode.AsciiMatrix;
@@ -248,7 +275,23 @@ internal sealed class CliOptions
     internal ColorOptions Colors { get; private init; } = ColorOptions.Default;
     internal double Density { get; private init; } = EngineConstants.DefaultDensity;
     internal double CursorIntensity { get; private init; } = EngineConstants.DefaultCursorIntensity;
+    internal bool HasExplicitCursorIntensity { get; private init; }
+    internal ShaderBloomMode ShaderBloom { get; private init; } = ShaderBloomMode.Auto;
     internal int Fps { get; private init; } = EngineConstants.DefaultTargetFps;
+
+    internal bool IsShaderBloomActive(TerminalProfile terminal) =>
+        ShaderBloom switch
+        {
+            ShaderBloomMode.On => true,
+            ShaderBloomMode.Off => false,
+            ShaderBloomMode.Auto => terminal.SupportsTerminalShaders,
+            _ => false,
+        };
+
+    internal double ResolveCursorIntensity(TerminalProfile terminal) =>
+        IsShaderBloomActive(terminal) && !HasExplicitCursorIntensity
+            ? EngineConstants.ShaderBloomCursorIntensity
+            : CursorIntensity;
 
     internal static CliOptions Parse(string[] args)
     {
@@ -263,6 +306,8 @@ internal sealed class CliOptions
         var hasPositionalDuration = false;
         ColorValue? bg = null, head = null, bright = null, dim = null;
         var cursorIntensity = EngineConstants.DefaultCursorIntensity;
+        var hasCursorIntensityFlag = false;
+        var shaderBloom = ShaderBloomMode.Auto;
         var fps = EngineConstants.DefaultTargetFps;
 
         for (var i = 0; i < args.Length; i++)
@@ -339,6 +384,13 @@ internal sealed class CliOptions
                         return Error("missing value for --cursor-intensity");
                     if (!TryParseCursorIntensity(args[i], out cursorIntensity))
                         return Error("invalid --cursor-intensity value (expected 0.5 to 5.0)");
+                    hasCursorIntensityFlag = true;
+                    break;
+                case "--shader-bloom":
+                    if (++i >= args.Length)
+                        return Error("missing value for --shader-bloom");
+                    if (!TryParseShaderBloom(args[i], out shaderBloom))
+                        return Error("invalid --shader-bloom value (expected auto, on, or off)");
                     break;
                 case "--fps":
                     if (++i >= args.Length)
@@ -377,6 +429,8 @@ internal sealed class CliOptions
             DurationSeconds = duration,
             Density = density,
             CursorIntensity = cursorIntensity,
+            HasExplicitCursorIntensity = hasCursorIntensityFlag,
+            ShaderBloom = shaderBloom,
             Fps = fps,
             Colors = new ColorOptions(
                 bg ?? ColorOptions.DefaultBackground,
@@ -417,6 +471,30 @@ internal sealed class CliOptions
             return false;
         return fps is >= EngineConstants.MinTargetFps and <= EngineConstants.MaxTargetFps;
     }
+
+    private static bool TryParseShaderBloom(ReadOnlySpan<char> text, out ShaderBloomMode mode)
+    {
+        if (text.Equals("auto", StringComparison.OrdinalIgnoreCase))
+        {
+            mode = ShaderBloomMode.Auto;
+            return true;
+        }
+
+        if (text.Equals("on", StringComparison.OrdinalIgnoreCase))
+        {
+            mode = ShaderBloomMode.On;
+            return true;
+        }
+
+        if (text.Equals("off", StringComparison.OrdinalIgnoreCase))
+        {
+            mode = ShaderBloomMode.Off;
+            return true;
+        }
+
+        mode = default;
+        return false;
+    }
 }
 
 internal readonly struct ColorOptions(
@@ -431,10 +509,10 @@ internal readonly struct ColorOptions(
         DefaultBright,
         DefaultDim);
 
-    internal static readonly ColorValue DefaultBackground = new(new Rgb(0, 0, 0));
-    internal static readonly ColorValue DefaultHead = new(new Rgb(255, 255, 255));
-    internal static readonly ColorValue DefaultBright = new(new Rgb(48, 255, 88));
-    internal static readonly ColorValue DefaultDim = new(new Rgb(0, 170, 28));
+    internal static readonly ColorValue DefaultBackground = new(new Rgb(0, 0, 0)); // #000000
+    internal static readonly ColorValue DefaultHead = new(new Rgb(255, 255, 255)); // #D8FFD8
+    internal static readonly ColorValue DefaultBright = new(new Rgb(48, 255, 88)); // #30FF58
+    internal static readonly ColorValue DefaultDim = new(new Rgb(5, 61, 22)); // #053D16
 
     internal ColorValue Background { get; } = background;
     internal ColorValue Head { get; } = head;
@@ -575,6 +653,41 @@ internal static class ColorParser
         }
 
         return best;
+    }
+}
+
+internal readonly struct TerminalProfile
+{
+    internal bool IsParTerm { get; init; }
+    internal bool IsWindowsTerminal { get; init; }
+    internal bool SupportsTerminalShaders => IsWindowsTerminal;
+
+    internal static TerminalProfile Detect() => new()
+    {
+        IsWindowsTerminal = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_SESSION")),
+    };
+}
+
+internal static class ShaderBloomSupport
+{
+    internal static void WriteStartupNotes(CliOptions options, TerminalProfile terminal)
+    {
+        if (!options.IsShaderBloomActive(terminal))
+            return;
+
+        if (terminal.IsWindowsTerminal)
+        {
+            Console.Error.WriteLine(
+                "note: Windows Terminal + shader-bloom: set experimental.pixelShaderPath to " +
+                "shaders/windows-terminal/matrix-bloom.hlsl, open a new tab, then run " +
+                "\"Toggle shader effects\" from the command palette (Ctrl+Shift+P). " +
+                "Shaders are off by default.");
+            return;
+        }
+
+        Console.Error.WriteLine(
+            "warning: --shader-bloom active but terminal is not Windows Terminal; " +
+            "software head bloom is reduced — enable a terminal shader for the full effect.");
     }
 }
 
@@ -1140,7 +1253,7 @@ internal sealed class MatrixEngine : IDisposable
             if (!IsStreamColumn(x))
                 continue;
             streamCount++;
-            if (_columns[x].Active)
+            if (IsColumnActive(x))
                 activeCount++;
         }
 
@@ -1243,6 +1356,21 @@ internal sealed class MatrixEngine : IDisposable
     private bool IsStreamColumn(int x) =>
         !_wideColumns || ((x & 1) == 0 && x + 1 < _width);
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int StreamIndex(int x, int slot) =>
+        x * EngineConstants.MaxStreamsPerColumn + slot;
+
+    private bool IsColumnActive(int x)
+    {
+        for (var slot = 0; slot < EngineConstants.MaxStreamsPerColumn; slot++)
+        {
+            if (_columns[StreamIndex(x, slot)].Active)
+                return true;
+        }
+
+        return false;
+    }
+
     internal void Render(Stream stdout)
     {
         var needed = _width * _height * 72 + _height * 24 + 96;
@@ -1274,12 +1402,13 @@ internal sealed class MatrixEngine : IDisposable
         _pendingResizeStable = EngineConstants.ResizeStableFrames;
         UpdateDensityChances();
         _grid = ArrayPool<Cell>.Shared.Rent(_width * _height);
-        _columns = ArrayPool<ColumnState>.Shared.Rent(_width);
+        _columns = ArrayPool<ColumnState>.Shared.Rent(_width * EngineConstants.MaxStreamsPerColumn);
         Array.Clear(_grid, 0, _width * _height);
 
         for (var x = 0; x < _width; x++)
         {
-            _columns[x] = default;
+            for (var slot = 0; slot < EngineConstants.MaxStreamsPerColumn; slot++)
+                _columns[StreamIndex(x, slot)] = default;
             if (IsStreamColumn(x) && RollPercent(_activeChancePercent))
                 ActivateColumn(x);
         }
@@ -1291,35 +1420,53 @@ internal sealed class MatrixEngine : IDisposable
 
     private void UpdateColumn(int x)
     {
-        ref var column = ref _columns[x];
-        if (!column.Active)
+        ClearColumn(x);
+
+        var activeCount = 0;
+        var freeSlot = -1;
+        for (var slot = 0; slot < EngineConstants.MaxStreamsPerColumn; slot++)
         {
-            if (_spawnsThisFrame < EngineConstants.MaxSpawnsPerFrame &&
-                RollPercent(_spawnChancePercent))
-            {
-                ActivateColumn(x);
-                _spawnsThisFrame++;
-            }
-            return;
+            ref var stream = ref _columns[StreamIndex(x, slot)];
+            if (stream.Active)
+                activeCount++;
+            else if (freeSlot < 0)
+                freeSlot = slot;
         }
 
-        var speed = column.Speed;
-        ShiftColumnDown(x, speed);
-        column.HeadY += speed;
+        if (freeSlot >= 0 && _spawnsThisFrame < EngineConstants.MaxSpawnsPerFrame)
+        {
+            if (activeCount == 0 && RollPercent(_spawnChancePercent))
+            {
+                ActivateColumn(x, freeSlot);
+                _spawnsThisFrame++;
+            }
+            else if (activeCount > 0 && ShouldRecycleColumn(x) && RollPercent(_spawnChancePercent))
+            {
+                ActivateColumn(x, freeSlot, recycled: true);
+                _spawnsThisFrame++;
+            }
+        }
+
+        for (var slot = 0; slot < EngineConstants.MaxStreamsPerColumn; slot++)
+            UpdateStream(x, slot);
+    }
+
+    private void UpdateStream(int x, int slot)
+    {
+        ref var column = ref _columns[StreamIndex(x, slot)];
+        if (!column.Active)
+            return;
+
+        column.HeadY += column.Speed;
 
         var trailTop = column.HeadY - column.TrailLength + 1;
         if (trailTop > _height - 1)
         {
-            ClearColumn(x);
             column.Active = false;
             return;
         }
 
         var headY = column.HeadY;
-        var clearAboveEnd = Math.Min(trailTop, _height);
-        for (var y = 0; y < clearAboveEnd; y++)
-            ClearDisplayCells(x, y);
-
         var updateStart = Math.Max(0, trailTop);
         var updateEnd = Math.Min(headY, _height - 1);
         for (var y = updateStart; y <= updateEnd; y++)
@@ -1333,15 +1480,14 @@ internal sealed class MatrixEngine : IDisposable
                 cell.Glyph = _pool.Pick(_rng);
 
             var wave = RainBrightness.Compute(y, _height, _simTime, column);
+            wave = MathF.Max(wave, NearHeadWaveFloor(dist));
             var envelope = TrailEnvelope(dist, column.TrailLength);
+            wave = EngineConstants.RainWaveMinimum + wave * (1f - EngineConstants.RainWaveMinimum);
             var brightness = wave * envelope;
             var cursorBoost = (byte)(dist == 0 ? 1 : 0);
             var brightnessByte = (byte)Math.Clamp((int)(brightness * 255), 0, 255);
             SetDisplayGlyph(x, y, cell.Glyph, brightnessByte, cursorBoost);
         }
-
-        for (var y = Math.Max(headY + 1, 0); y < _height; y++)
-            ClearDisplayCells(x, y);
     }
 
     /// <summary>1 at Head, 0 at trail tip. Gamma &lt; 1 keeps mid-trail brighter while the tip still fades out.</summary>
@@ -1353,13 +1499,27 @@ internal sealed class MatrixEngine : IDisposable
         return MathF.Pow(linear, (float)EngineConstants.TrailEnvelopeGamma);
     }
 
+    private static float NearHeadWaveFloor(int distanceFromHead)
+    {
+        if (distanceFromHead <= 0)
+            return 1f;
+        if (distanceFromHead >= EngineConstants.NearHeadBrightnessFloorCells)
+            return 0f;
+
+        var t = distanceFromHead / (float)EngineConstants.NearHeadBrightnessFloorCells;
+        return EngineConstants.NearHeadBrightnessFloor * (1f - t * t);
+    }
+
     private void SetDisplayGlyph(int x, int y, char glyph, byte brightness, byte cursorBoost)
     {
         ref var cell = ref _grid[y * _width + x];
+        if (cell.State == (byte)CellState.Glyph && brightness < cell.Brightness && cursorBoost <= cell.CursorBoost)
+            return;
+
         cell.State = (byte)CellState.Glyph;
         cell.Glyph = glyph;
         cell.Brightness = brightness;
-        cell.CursorBoost = cursorBoost;
+        cell.CursorBoost = Math.Max(cell.CursorBoost, cursorBoost);
         if (_wideColumns && x + 1 < _width)
         {
             ref var cont = ref _grid[y * _width + x + 1];
@@ -1387,28 +1547,50 @@ internal sealed class MatrixEngine : IDisposable
         }
     }
 
-    private void ShiftColumnDown(int x, int speed)
+    private bool ShouldRecycleColumn(int x)
     {
-        if (speed <= 0)
-            return;
+        if (_height <= 0)
+            return false;
 
-        var span = _wideColumns ? 2 : 1;
-        var limit = Math.Min(speed, _height);
-        for (var y = _height - 1; y >= limit; y--)
+        var visibleCells = 0;
+        var headY = int.MinValue;
+        for (var slot = 0; slot < EngineConstants.MaxStreamsPerColumn; slot++)
         {
-            for (var dx = 0; dx < span && x + dx < _width; dx++)
-            {
-                ref var dest = ref _grid[y * _width + x + dx];
-                ref var src = ref _grid[(y - limit) * _width + x + dx];
-                dest = src;
-            }
+            ref var column = ref _columns[StreamIndex(x, slot)];
+            if (!column.Active)
+                continue;
+
+            headY = Math.Max(headY, column.HeadY);
+            var trailTop = column.HeadY - column.TrailLength + 1;
+            var visibleStart = Math.Max(0, trailTop);
+            var visibleEnd = Math.Min(column.HeadY, _height - 1);
+            if (visibleEnd >= visibleStart)
+                visibleCells += visibleEnd - visibleStart + 1;
         }
 
-        for (var y = 0; y < limit; y++)
-            ClearDisplayCells(x, y);
+        var recycleStart = (int)Math.Round(_height * EngineConstants.RecycleStartHeadFraction);
+        if (headY < recycleStart)
+            return false;
+
+        var visibleFraction = Math.Min(1.0, visibleCells / (double)_height);
+        var progress = Math.Clamp((headY - recycleStart) / (double)Math.Max(1, _height - recycleStart), 0.0, 1.0);
+
+        if (visibleFraction <= EngineConstants.RecycleSparseVisibleFraction)
+            return RollPercent((int)Math.Round(35 + progress * 50));
+
+        if (visibleFraction >= EngineConstants.RecycleDenseVisibleFraction && headY <= _height - 1)
+            return false;
+
+        var coverageDelay = Math.Clamp(
+            (visibleFraction - EngineConstants.RecycleSparseVisibleFraction) /
+            (EngineConstants.RecycleDenseVisibleFraction - EngineConstants.RecycleSparseVisibleFraction),
+            0.0,
+            1.0);
+        var chance = Math.Clamp((progress - coverageDelay * 0.45) * 60, 0, 65);
+        return RollPercent((int)Math.Round(chance));
     }
 
-    private void ActivateColumn(int x)
+    private void ActivateColumn(int x, int slot = 0, bool recycled = false)
     {
         var minTrail = (int)Math.Round(
             Math.Max(EngineConstants.MinTrailCells, _height * EngineConstants.TrailMinHeightFraction) * _trailLengthBoost);
@@ -1418,10 +1600,10 @@ internal sealed class MatrixEngine : IDisposable
         minTrail = Math.Min(minTrail, maxTrail);
         var speed = (byte)_rng.Next(EngineConstants.MinSpeed, EngineConstants.MaxSpeed + 1);
 
-        _columns[x] = new ColumnState
+        _columns[StreamIndex(x, slot)] = new ColumnState
         {
             Active = true,
-            HeadY = -_rng.Next(0, Math.Max(1, _height)),
+            HeadY = -_rng.Next(0, Math.Max(1, recycled ? (int)Math.Round(_height * EngineConstants.RecycleInitialDelayHeightFraction) : _height)),
             Speed = speed,
             TrailLength = _rng.Next(minTrail, maxTrail + 1),
             TimeOffset = RainBrightness.ColumnTimeOffset(x),
@@ -1664,6 +1846,7 @@ Usage:
   matrix --fps <1-60>
   matrix --bg <color> --head <color> --bright <color> --dim <color>
   matrix --cursor-intensity <0.5-5.0>
+  matrix --shader-bloom <auto|on|off>
   matrix --help
   matrix --version
 
@@ -1690,6 +1873,10 @@ Colors:
   Hex (#RGB or #RRGGBB) or 16-color names (black, green, darkgreen, ...).
   Defaults: --bg #000000 --head #FFFFFF --bright #30FF58 --dim #00AA1C
   --cursor-intensity  Head-cell bloom strength (additive --head). Default 2.5.
+  --shader-bloom      Terminal GPU bloom (default auto). Auto enables for Windows Terminal,
+                      lowering software head bloom to 1.0 unless --cursor-intensity
+                      is set. WT: toggle shader effects in the
+                      command palette after setting experimental.pixelShaderPath.
 
 Examples:
   matrix
