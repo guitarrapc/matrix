@@ -158,9 +158,9 @@ internal static class EngineConstants
     internal const int DensityActiveBasePercent = 55;
     internal const int DensitySpawnBasePercent = 6;
     internal const double MovieDensityBoost = 1.5;
-    internal const double TrailMinHeightFraction = 0.15;
+    internal const double TrailMinHeightFraction = 0.30;
     internal const double TrailMaxHeightFraction = 0.90;
-    internal const int MinTrailCells = 4;
+    internal const int MinTrailCells = 10;
     internal const double RainFallSpeed = 0.3;
     internal const double RaindropLength = 0.75;
     internal const double DitherMagnitude = 0.05;
@@ -1119,11 +1119,21 @@ internal sealed class MatrixEngine
             if (_rng.Next(100) < EngineConstants.GlyphMutationChance)
                 cell.Glyph = _pool.Pick(_rng);
 
-            var brightness = RainBrightness.Compute(y, _height, _simTime, column);
+            var wave = RainBrightness.Compute(y, _height, _simTime, column);
+            var envelope = TrailEnvelope(dist, column.TrailLength);
+            var brightness = wave * envelope;
             var cursorBoost = (byte)(dist == 0 ? 1 : 0);
             var brightnessByte = (byte)Math.Clamp((int)(brightness * 255), 0, 255);
             SetDisplayGlyph(x, y, cell.Glyph, brightnessByte, cursorBoost);
         }
+    }
+
+    /// <summary>1 at Head, 0 at trail tip — ensures the top of every stream fades to black.</summary>
+    private static float TrailEnvelope(int distanceFromHead, int trailLength)
+    {
+        if (trailLength <= 1)
+            return 1f;
+        return (float)(trailLength - 1 - distanceFromHead) / (trailLength - 1);
     }
 
     private void SetDisplayGlyph(int x, int y, char glyph, byte brightness, byte cursorBoost)

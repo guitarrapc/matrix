@@ -38,9 +38,10 @@ Wide glyphs use an **anchor** cell plus a **Continuation** cell to the right. Co
 
 ### Color and brightness
 
-Color is driven by the Matrix rain (GLSL + palette pass), not by simple distance-from-head shading:
+Color is driven by the Matrix rain wave **and** a trail envelope:
 
-- **Brightness** comes from a per-column **wave** (shared pulse, raindrop truncation). It is **not** trail position.
+- **Wave** — per-column pulse and raindrop truncation (reference `getRainBrightness`).
+- **Trail envelope** — linear fade from Head (**1.0**) to trail tip (**0.0**). Final brightness = wave × envelope so every stream’s **top always dims toward black**, matching the film.
 - **Palette:** four CLI colors (`--bg`, `--dim`, `--bright`, `--head`) define a brightness→color map. The LUT tops out at vivid green (`--bright`); **`--head` is applied only on the stream Head** (white bloom), not across high wave brightness.
 - **Cursor highlight:** the Head cell only (`dist == 0`); not raindrop wave edges.
 - **Dither** on brightness before palette lookup.
@@ -58,7 +59,7 @@ True Color terminals use 24-bit ANSI; others fall back to the nearest 16-color n
 |---|---|
 | FPS | 14 |
 | `--density` | 0.0–1.0; default **0.55** (ascii-matrix / single), **0.7** (movie) |
-| Trail length | height × 0.15 … 0.90 per stream (min 4 cells) |
+| Trail length | height × **0.30** … 0.90 per stream (min **10** cells) |
 | Fall speed | 1–2 cells/frame per column |
 | Glyph mutation | ~35% per frame per visible stream cell |
 | Movie density | effective density × **1.5** (cap 1.0) |
@@ -177,7 +178,7 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 | 2 | Fade byte = distance from Head, piecewise RGB | Better trails, still not Matrix-like |
 | 3 | **256-entry palette LUT** + **wave brightness** + dither + cursor boost | Current model |
 
-Brightness is **wave-driven**, not trail-distance-driven. The four CLI colors define the palette; do not replace with ad-hoc per-cell RGB lerps.
+Brightness is **wave × trail envelope**, not wave alone. Wave-only brightness left some stream tips vivid when the wave phase was high; the envelope guarantees a dim tail on every column.
 
 ### Wave port — regressions that produced all-white output
 
