@@ -51,25 +51,29 @@ Stream updates shift anchor and Continuation cells **together** as a pair.
 
 ### Cell display states
 
-Each terminal display cell is in exactly one of five states:
+Each terminal display cell is in exactly one of four states:
 
 | State | Appearance | Role |
 |---|---|---|
-| **Empty** | Background only, no visible glyph | Inactive column, or stream not present at this row |
-| **Dim** | Dark green (configurable) | Upper trail (farther above the Head) |
-| **Bright** | Highlight green (configurable) | Lower trail (near the Head) |
-| **Head** | White (configurable) | Leading edge at the bottom of the active segment |
+| **Empty** | Background only | Inactive column, or stream not present at this row |
+| **Glyph** | Colored character | Part of an active stream; brightness from **Fade** |
 | **Continuation** | (nothing written) | Second display cell of a wide glyph; render skips it |
 
-Within an active stream, state is determined by **distance from the Head** (fixed bands), not by per-cell random fading:
+### Trail brightness (Fade gradient)
 
-| Transition | Rule |
+Brightness is **not** a small set of discrete states. Each **Glyph** cell stores **Fade** (0–255): distance from the Head normalized over that stream’s trail length (`0` = Head, `255` = tail tip).
+
+At render time, Fade maps through **four CLI colors** in three linear segments:
+
+| Fade range (`t`) | Interpolation |
 |---|---|
-| **Head → Bright** | When the stream shifts down, the cell that was Head becomes Bright. |
-| **Bright → Dim** | By distance above the Head (older segment of the trail). |
-| **Dim → Empty** | When the cell **leaves** the stream (scrolls off the top of the screen or the stream ends) — **not** by random erasure while still inside the trail. |
+| `t ≤ 0.15` | `--head` → `--bright` |
+| `t ≤ 0.60` | `--bright` → `--dim` |
+| `t ≤ 1.00` | `--dim` → `--bg` |
 
-This matches the film: the trail is a **continuous vertical gradient** behind the Head; irregularity comes from **between-column sparsity** and **glyph mutation**, not from breaking the column into disjoint lit cells.
+**True Color:** interpolated RGB as 24-bit ANSI. **16-color fallback:** interpolate then map to the nearest named color.
+
+Within an active stream, **Dim → Empty** occurs only when the cell leaves the stream (scrolls off or the stream ends), not randomly mid-trail.
 
 ### Frame rate and terminal presentation
 
@@ -79,21 +83,21 @@ This matches the film: the trail is a **continuous vertical gradient** behind th
 - On exit (timeout or user input), the terminal is restored to its pre-animation state with no trailing message.
 - When the terminal is resized during playback, column and row counts are recalculated where the environment allows.
 
-### v1 animation tuning (not exposed on CLI)
-
-These values are fixed in v1; they define the default look and resource profile:
+### Animation tuning
 
 | Parameter | Value |
 |---|---|
 | Target FPS | 18 |
-| Active columns | ~35% of columns at a time |
-| Trail length | 8–24 characters per column (random per column) |
+| `--density` | **0.0–1.0**, default **0.55** (see below) |
+| Trail length | Per stream at spawn: **height × 0.15 … height × 0.90** (minimum 4 cells), random |
 | Fall speed | 1–3 cells per frame (random per column); entire stream shifts by this amount |
-| Head → Bright | Always on shift (former Head cell) |
-| Bright vs Dim | By distance band within trail (not random per frame) |
-| Dim → Empty | Only when cell exits stream or column deactivates (not random mid-trail) |
 | Glyph mutation | ~8% chance per frame per visible cell in stream |
-| New column spawn | ~3% chance per frame among inactive columns |
+| Movie density boost | Effective density **× 1.5** (capped at 1.0) to offset even-column spacing |
+
+**Density** scales both initial active columns and spawn rate:
+
+- `activeChance = density × 55%`
+- `spawnChance = density × 6%` per frame among inactive stream columns
 
 ---
 
@@ -132,6 +136,7 @@ matrix [duration]
 matrix --duration <seconds>
 matrix --char <character>
 matrix --mode movie
+matrix --density <0.0-1.0>
 matrix --bg <color> --head <color> --bright <color> --dim <color>
 matrix --help
 matrix --version
@@ -151,6 +156,7 @@ Both a trailing positional duration and `--duration` are supported; only one eff
 
 | Option | Behavior |
 |---|---|
+| `--density` | Rain density **0.0–1.0** (default **0.55**). Invalid or out-of-range values are errors. |
 | `--help` | Print usage, modes, duration, color options, and examples (English) |
 | `--version` | Print `matrix <version>` (e.g. `matrix 1.0.0`) |
 
@@ -297,7 +303,8 @@ Archives use `.tar.gz` on Unix-like platforms and `.zip` on Windows.
 
 | Decision | Why |
 |---|---|
-| Vertical stream shift + distance-based 4 states | Film-like straight-line fall; black mostly between columns |
+| Vertical stream shift + Fade gradient | Film-like straight-line fall with smooth bright-to-dark trails |
+| `--density` + movie boost | Tunable sparsity; movie mode compensates for even-column layout |
 | ascii-matrix default; movie mode optional | Broad terminal compatibility by default; authentic script when UTF-8 is available |
 | True Color hex + named colors + 16-color fallback | Rich defaults on modern terminals; graceful degradation elsewhere |
 | Alternate screen + restore | Preserves shell scrollback and prompt UX |
@@ -317,3 +324,4 @@ Archives use `.tar.gz` on Unix-like platforms and `.zip` on Windows.
 - **Hot-path rendering:** pre-built ANSI byte sequences, `ArrayPool` grids/buffers, and a single `Stream.Write` + `Flush` per frame keep allocations out of the animation loop; palette and glyph pools are initialized once at startup.
 - **Vertical motion must be explicit in the spec:** the film reads as straight-line falls because each stream moves down as one contiguous segment. An early design treated **Dim → Empty** as high per-frame probability anywhere in the column; that produced scattered, flickering cells and did **not** look like Matrix rain. **Black belongs mostly between columns**, not inside active trails. The visual spec was revised; animation now **shifts each column down as a unit** and assigns Bright/Dim by distance from the Head.
 - **Terminal cell width ≠ one code unit in movie mode:** katakana is **full-width (two terminal cells)**; half-width ASCII is one cell. Placing both in the same logical column breaks vertical alignment, and adjacent streams collide when a wide glyph spans into the next column. Movie mode uses **even column indices**, **full-width glyphs only**, and a **Continuation** display cell whose render output is empty. Earlier fixes that cleared odd columns but still **printed a space** there caused cursor drift and crooked lines; the display-cell grid removes that spurious output.
+- **Discrete Head/Bright/Dim states were too coarse for the film look:** a **Fade** byte plus piecewise RGB interpolation across `--head` / `--bright` / `--dim` / `--bg` better matches gradual trail falloff. Sixteen-color terminals use the same Fade curve with nearest-color quantization.

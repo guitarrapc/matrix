@@ -70,7 +70,7 @@ catch (InvalidOperationException ex)
 }
 
 var palette = AnsiPalette.Create(options.Colors, useTrueColor);
-var engine = new MatrixEngine(pool, palette);
+var engine = new MatrixEngine(pool, palette, options.Density);
 
 var restore = TerminalSession.Enter(keyExitEnabled);
 var exitRequested = false;
@@ -142,25 +142,26 @@ internal enum GlyphMode : byte
 internal enum CellState : byte
 {
     Empty = 0,
-    Dim = 1,
-    Bright = 2,
-    Head = 3,
-    /// <summary>Right display cell of a wide glyph; nothing is written when rendering.</summary>
-    Continuation = 4,
+    Glyph = 1,
+    Continuation = 2,
 }
 
 internal static class EngineConstants
 {
     internal const int TargetFps = 18;
     internal const int FrameDelayMs = 1000 / TargetFps;
-    internal const int SpawnChancePercent = 3;
-    internal const int InitialActivePercent = 35;
     internal const int GlyphMutationChance = 8;
-    internal const int MinTrailLength = 8;
-    internal const int MaxTrailLength = 24;
     internal const int MinSpeed = 1;
     internal const int MaxSpeed = 3;
-    internal const int BrightDistance = 2;
+    internal const double DefaultDensity = 0.55;
+    internal const int DensityActiveBasePercent = 55;
+    internal const int DensitySpawnBasePercent = 6;
+    internal const double MovieDensityBoost = 1.5;
+    internal const double TrailMinHeightFraction = 0.15;
+    internal const double TrailMaxHeightFraction = 0.90;
+    internal const int MinTrailCells = 4;
+    internal const double FadeSegment1End = 0.15;
+    internal const double FadeSegment2End = 0.60;
 }
 
 internal readonly struct Rgb(byte r, byte g, byte b)
@@ -220,6 +221,7 @@ internal sealed class CliOptions
     internal bool ShowVersion { get; private init; }
     internal string? ErrorMessage { get; private init; }
     internal ColorOptions Colors { get; private init; } = ColorOptions.Default;
+    internal double Density { get; private init; } = EngineConstants.DefaultDensity;
 
     internal static CliOptions Parse(string[] args)
     {
@@ -228,6 +230,7 @@ internal sealed class CliOptions
         var hasChar = false;
         var singleChar = '0';
         var duration = 5.0;
+        var density = EngineConstants.DefaultDensity;
         var hasDurationFlag = false;
         var hasPositionalDuration = false;
         ColorValue? bg = null, head = null, bright = null, dim = null;
@@ -294,6 +297,12 @@ internal sealed class CliOptions
                         return Error($"invalid color for --dim: {args[i]}");
                     dim = cDim;
                     break;
+                case "--density":
+                    if (++i >= args.Length)
+                        return Error("missing value for --density");
+                    if (!TryParseDensity(args[i], out density))
+                        return Error("invalid --density value (expected 0.0 to 1.0)");
+                    break;
                 default:
                     if (arg.StartsWith('-'))
                         return Error($"unknown option: {arg}");
@@ -320,6 +329,7 @@ internal sealed class CliOptions
             Mode = mode,
             SingleChar = singleChar,
             DurationSeconds = duration,
+            Density = density,
             Colors = new ColorOptions(
                 bg ?? ColorOptions.DefaultBackground,
                 head ?? ColorOptions.DefaultHead,
@@ -334,6 +344,14 @@ internal sealed class CliOptions
     {
         seconds = 0;
         return double.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out seconds);
+    }
+
+    private static bool TryParseDensity(ReadOnlySpan<char> text, out double density)
+    {
+        density = 0;
+        if (!double.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out density))
+            return false;
+        return density is >= 0 and <= 1;
     }
 }
 
@@ -556,42 +574,63 @@ internal static class TerminalCapabilities
     private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 }
 
+internal sealed class ColorGradient(Rgb head, Rgb bright, Rgb dim, Rgb bg)
+{
+    private readonly Rgb _head = head;
+    private readonly Rgb _bright = bright;
+    private readonly Rgb _dim = dim;
+    private readonly Rgb _bg = bg;
+
+    internal Rgb Sample(byte fade)
+    {
+        var t = fade / 255.0;
+        if (t <= EngineConstants.FadeSegment1End)
+            return Lerp(_head, _bright, t / EngineConstants.FadeSegment1End);
+        if (t <= EngineConstants.FadeSegment2End)
+            return Lerp(_bright, _dim, (t - EngineConstants.FadeSegment1End) / (EngineConstants.FadeSegment2End - EngineConstants.FadeSegment1End));
+        return Lerp(_dim, _bg, (t - EngineConstants.FadeSegment2End) / (1.0 - EngineConstants.FadeSegment2End));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Rgb Lerp(Rgb from, Rgb to, double t)
+    {
+        t = Math.Clamp(t, 0, 1);
+        return new Rgb(
+            (byte)(from.R + (to.R - from.R) * t),
+            (byte)(from.G + (to.G - from.G) * t),
+            (byte)(from.B + (to.B - from.B) * t));
+    }
+}
+
 internal sealed class AnsiPalette
 {
     private readonly byte[] _home = "\u001b[H"u8.ToArray();
     private readonly byte[] _bgRowPrefix;
-    private readonly byte[][] _fgByState;
     private readonly byte[] _space = " "u8.ToArray();
     private readonly byte[] _newline = "\n"u8.ToArray();
+    private readonly ColorGradient _gradient;
+    private readonly bool _trueColor;
 
-    private AnsiPalette(byte[] bgRowPrefix, byte[][] fgByState)
+    private AnsiPalette(byte[] bgRowPrefix, ColorGradient gradient, bool trueColor)
     {
         _bgRowPrefix = bgRowPrefix;
-        _fgByState = fgByState;
+        _gradient = gradient;
+        _trueColor = trueColor;
     }
 
     internal static AnsiPalette Create(ColorOptions colors, bool trueColor)
     {
-        if (trueColor)
-        {
-            return new AnsiPalette(
-                BuildTrueColorBgPrefix(ResolveRgb(colors.Background)),
-                [
-                    Array.Empty<byte>(),
-                    BuildTrueColorFgPrefix(ResolveRgb(colors.Dim)),
-                    BuildTrueColorFgPrefix(ResolveRgb(colors.Bright)),
-                    BuildTrueColorFgPrefix(ResolveRgb(colors.Head)),
-                ]);
-        }
+        var gradient = new ColorGradient(
+            ResolveRgb(colors.Head),
+            ResolveRgb(colors.Bright),
+            ResolveRgb(colors.Dim),
+            ResolveRgb(colors.Background));
 
-        return new AnsiPalette(
-            BuildAnsi16BgPrefix(ResolveNamed(colors.Background)),
-            [
-                Array.Empty<byte>(),
-                BuildAnsi16FgPrefix(ResolveNamed(colors.Dim)),
-                BuildAnsi16FgPrefix(ResolveNamed(colors.Bright)),
-                BuildAnsi16FgPrefix(ResolveNamed(colors.Head)),
-            ]);
+        var bgPrefix = trueColor
+            ? BuildTrueColorBgPrefix(ResolveRgb(colors.Background))
+            : BuildAnsi16BgPrefix(ResolveNamed(colors.Background));
+
+        return new AnsiPalette(bgPrefix, gradient, trueColor);
     }
 
     private static Rgb ResolveRgb(ColorValue color) => color.Rgb;
@@ -604,11 +643,16 @@ internal sealed class AnsiPalette
     }
 
     private static byte[] BuildTrueColorBgPrefix(Rgb rgb) => BuildTrueColorSequence(isBackground: true, rgb);
-    private static byte[] BuildTrueColorFgPrefix(Rgb rgb) => BuildTrueColorSequence(isBackground: false, rgb);
 
     private static byte[] BuildTrueColorSequence(bool isBackground, Rgb rgb)
     {
         Span<byte> scratch = stackalloc byte[64];
+        WriteTrueColorSequence(scratch, isBackground, rgb, out var length);
+        return scratch[..length].ToArray();
+    }
+
+    private static void WriteTrueColorSequence(Span<byte> scratch, bool isBackground, Rgb rgb, out int length)
+    {
         scratch[0] = 0x1B;
         scratch[1] = (byte)'[';
         scratch[2] = (byte)(isBackground ? '4' : '3');
@@ -623,7 +667,7 @@ internal sealed class AnsiPalette
         scratch[pos++] = (byte)';';
         pos += AppendDecimal(scratch[pos..], rgb.B);
         scratch[pos++] = (byte)'m';
-        return scratch[..pos].ToArray();
+        length = pos;
     }
 
     private static byte[] BuildAnsi16BgPrefix(ConsoleColor16 color)
@@ -632,21 +676,21 @@ internal sealed class AnsiPalette
         return BuildAnsi16Sequence(code);
     }
 
-    private static byte[] BuildAnsi16FgPrefix(ConsoleColor16 color)
-    {
-        var code = color <= ConsoleColor16.White ? 30 + (int)color : 90 + ((int)color - 8);
-        return BuildAnsi16Sequence(code);
-    }
-
     private static byte[] BuildAnsi16Sequence(int code)
     {
         Span<byte> scratch = stackalloc byte[16];
+        WriteAnsi16Sequence(scratch, code, out var length);
+        return scratch[..length].ToArray();
+    }
+
+    private static void WriteAnsi16Sequence(Span<byte> scratch, int code, out int length)
+    {
         scratch[0] = 0x1B;
         scratch[1] = (byte)'[';
         var pos = 2;
         pos += AppendDecimal(scratch[pos..], code);
         scratch[pos++] = (byte)'m';
-        return scratch[..pos].ToArray();
+        length = pos;
     }
 
     private static int AppendDecimal(Span<byte> destination, int value)
@@ -675,6 +719,7 @@ internal sealed class AnsiPalette
     {
         var pos = 0;
         AppendBytes(buffer, ref pos, _home);
+        Span<byte> fgScratch = stackalloc byte[32];
 
         for (var y = 0; y < height; y++)
         {
@@ -692,7 +737,14 @@ internal sealed class AnsiPalette
                     continue;
                 }
 
-                AppendBytes(buffer, ref pos, _fgByState[cell.State]);
+                var rgb = _gradient.Sample(cell.Fade);
+                int fgLen;
+                if (_trueColor)
+                    WriteTrueColorSequence(fgScratch, isBackground: false, rgb, out fgLen);
+                else
+                    WriteAnsi16Sequence(fgScratch, Ansi16FgCode(ColorParser.NearestNamed(rgb)), out fgLen);
+
+                AppendBytes(buffer, ref pos, fgScratch[..fgLen]);
                 AppendCharUtf8(buffer, ref pos, cell.Glyph);
             }
 
@@ -702,6 +754,9 @@ internal sealed class AnsiPalette
         stdout.Write(buffer.AsSpan(0, pos));
         stdout.Flush();
     }
+
+    private static int Ansi16FgCode(ConsoleColor16 color) =>
+        color <= ConsoleColor16.White ? 30 + (int)color : 90 + ((int)color - 8);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void AppendBytes(byte[] buffer, ref int pos, ReadOnlySpan<byte> bytes)
@@ -729,6 +784,7 @@ internal sealed class AnsiPalette
 internal struct Cell
 {
     internal byte State;
+    internal byte Fade;
     internal char Glyph;
 }
 
@@ -792,6 +848,8 @@ internal sealed class MatrixEngine
     private readonly GlyphPool _pool;
     private readonly AnsiPalette _palette;
     private readonly bool _wideColumns;
+    private readonly int _activeChancePercent;
+    private readonly int _spawnChancePercent;
     private readonly Random _rng = new();
 
     private Cell[] _grid = [];
@@ -800,11 +858,19 @@ internal sealed class MatrixEngine
     private int _width;
     private int _height;
 
-    internal MatrixEngine(GlyphPool pool, AnsiPalette palette)
+    internal MatrixEngine(GlyphPool pool, AnsiPalette palette, double density)
     {
         _pool = pool;
         _palette = palette;
         _wideColumns = pool.RequiresWideColumns;
+
+        var effectiveDensity = Math.Clamp(density, 0, 1);
+        if (_wideColumns)
+            effectiveDensity = Math.Min(1.0, effectiveDensity * EngineConstants.MovieDensityBoost);
+
+        _activeChancePercent = Math.Min(100, (int)(effectiveDensity * EngineConstants.DensityActiveBasePercent));
+        _spawnChancePercent = Math.Min(100, (int)(effectiveDensity * EngineConstants.DensitySpawnBasePercent));
+
         Resize();
     }
 
@@ -834,7 +900,7 @@ internal sealed class MatrixEngine
 
     internal void Render(Stream stdout)
     {
-        var needed = _width * _height * 48 + 64;
+        var needed = _width * _height * 64 + 64;
         if (_renderBuffer.Length < needed)
         {
             if (_renderBuffer.Length > 0)
@@ -865,17 +931,21 @@ internal sealed class MatrixEngine
         for (var x = 0; x < _width; x++)
         {
             _columns[x] = default;
-            if (IsStreamColumn(x) && _rng.Next(100) < EngineConstants.InitialActivePercent)
+            if (IsStreamColumn(x) && RollPercent(_activeChancePercent))
                 ActivateColumn(x);
         }
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool RollPercent(int chance) =>
+        chance >= 100 || (chance > 0 && _rng.Next(100) < chance);
 
     private void UpdateColumn(int x)
     {
         ref var column = ref _columns[x];
         if (!column.Active)
         {
-            if (_rng.Next(100) < EngineConstants.SpawnChancePercent)
+            if (RollPercent(_spawnChancePercent))
                 ActivateColumn(x);
             return;
         }
@@ -906,29 +976,35 @@ internal sealed class MatrixEngine
             if (cell.State is (byte)CellState.Empty or (byte)CellState.Continuation)
                 cell.Glyph = _pool.Pick(_rng);
 
-            var state = dist == 0
-                ? (byte)CellState.Head
-                : dist <= EngineConstants.BrightDistance
-                    ? (byte)CellState.Bright
-                    : (byte)CellState.Dim;
-
             if (_rng.Next(100) < EngineConstants.GlyphMutationChance)
                 cell.Glyph = _pool.Pick(_rng);
 
-            SetDisplayGlyph(x, y, state, cell.Glyph);
+            var fade = ComputeFade(dist, column.TrailLength);
+            SetDisplayGlyph(x, y, cell.Glyph, fade);
         }
     }
 
-    private void SetDisplayGlyph(int x, int y, byte state, char glyph)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static byte ComputeFade(int distanceFromHead, int trailLength)
+    {
+        if (trailLength <= 0)
+            return 0;
+        var fade = distanceFromHead * 255 / trailLength;
+        return fade > 255 ? (byte)255 : (byte)fade;
+    }
+
+    private void SetDisplayGlyph(int x, int y, char glyph, byte fade)
     {
         ref var cell = ref _grid[y * _width + x];
-        cell.State = state;
+        cell.State = (byte)CellState.Glyph;
         cell.Glyph = glyph;
+        cell.Fade = fade;
         if (_wideColumns && x + 1 < _width)
         {
             ref var cont = ref _grid[y * _width + x + 1];
             cont.State = (byte)CellState.Continuation;
             cont.Glyph = '\0';
+            cont.Fade = 0;
         }
     }
 
@@ -937,11 +1013,13 @@ internal sealed class MatrixEngine
         ref var cell = ref _grid[y * _width + x];
         cell.State = (byte)CellState.Empty;
         cell.Glyph = '\0';
+        cell.Fade = 0;
         if (_wideColumns && x + 1 < _width)
         {
             ref var cont = ref _grid[y * _width + x + 1];
             cont.State = (byte)CellState.Empty;
             cont.Glyph = '\0';
+            cont.Fade = 0;
         }
     }
 
@@ -968,12 +1046,15 @@ internal sealed class MatrixEngine
 
     private void ActivateColumn(int x)
     {
+        var minTrail = Math.Max(EngineConstants.MinTrailCells, (int)(_height * EngineConstants.TrailMinHeightFraction));
+        var maxTrail = Math.Max(minTrail, (int)(_height * EngineConstants.TrailMaxHeightFraction));
+
         _columns[x] = new ColumnState
         {
             Active = true,
             HeadY = -_rng.Next(0, Math.Max(1, _height / 2)),
             Speed = (byte)_rng.Next(EngineConstants.MinSpeed, EngineConstants.MaxSpeed + 1),
-            TrailLength = (byte)_rng.Next(EngineConstants.MinTrailLength, EngineConstants.MaxTrailLength + 1),
+            TrailLength = _rng.Next(minTrail, maxTrail + 1),
         };
     }
 
@@ -989,7 +1070,7 @@ internal struct ColumnState
     internal bool Active;
     internal int HeadY;
     internal byte Speed;
-    internal byte TrailLength;
+    internal int TrailLength;
 }
 
 internal static class TerminalSession
@@ -1184,6 +1265,7 @@ Usage:
   matrix --duration <seconds>
   matrix --char <character>
   matrix --mode movie
+  matrix --density <0.0-1.0>
   matrix --bg <color> --head <color> --bright <color> --dim <color>
   matrix --help
   matrix --version
@@ -1196,6 +1278,10 @@ Modes:
   --char X    single-character mode
   --mode movie  katakana-heavy movie pool (UTF-8 terminal required)
 
+Density:
+  --density     Rain density from 0.0 (sparse) to 1.0 (dense). Default 0.55.
+                Movie mode applies a 1.5x effective boost (capped at 1.0).
+
 Colors:
   Hex (#RGB or #RRGGBB) or 16-color names (black, green, darkgreen, ...).
   Defaults: --bg #000000 --head #FFFFFF --bright #00FF41 --dim #008F11
@@ -1206,6 +1292,7 @@ Examples:
   matrix --duration 0
   matrix --char '#'
   matrix --mode movie 30
+  matrix --mode movie --density 0.8
   matrix --bright #0F0 --dim #080
 
 Press any key to exit early. Ctrl+C also exits cleanly.
