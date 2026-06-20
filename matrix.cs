@@ -264,6 +264,15 @@ internal enum ShaderBloomMode
     Off,
 }
 
+internal enum ColorPattern
+{
+    Classic,
+    Resurrections,
+    Operator,
+    Twilight,
+    Rainbow,
+}
+
 internal sealed class CliOptions
 {
     internal GlyphMode Mode { get; private init; } = GlyphMode.AsciiMatrix;
@@ -305,6 +314,7 @@ internal sealed class CliOptions
         var hasDurationFlag = false;
         var hasPositionalDuration = false;
         ColorValue? bg = null, head = null, bright = null, dim = null;
+        var pattern = ColorPattern.Classic;
         var cursorIntensity = EngineConstants.DefaultCursorIntensity;
         var hasCursorIntensityFlag = false;
         var shaderBloom = ShaderBloomMode.Auto;
@@ -372,6 +382,12 @@ internal sealed class CliOptions
                         return Error($"invalid color for --dim: {args[i]}");
                     dim = cDim;
                     break;
+                case "--pattern":
+                    if (++i >= args.Length)
+                        return Error("missing value for --pattern");
+                    if (!TryParseColorPattern(args[i], out pattern))
+                        return Error("invalid --pattern value (expected classic, resurrections, operator, twilight, or rainbow)");
+                    break;
                 case "--density":
                     if (++i >= args.Length)
                         return Error("missing value for --density");
@@ -422,6 +438,8 @@ internal sealed class CliOptions
         if (!hasDensityFlag && mode == GlyphMode.Movie)
             density = EngineConstants.DefaultMovieDensity;
 
+        var colors = ColorOptions.Create(pattern, bg, head, bright, dim);
+
         return new CliOptions
         {
             Mode = mode,
@@ -432,11 +450,7 @@ internal sealed class CliOptions
             HasExplicitCursorIntensity = hasCursorIntensityFlag,
             ShaderBloom = shaderBloom,
             Fps = fps,
-            Colors = new ColorOptions(
-                bg ?? ColorOptions.DefaultBackground,
-                head ?? ColorOptions.DefaultHead,
-                bright ?? ColorOptions.DefaultBright,
-                dim ?? ColorOptions.DefaultDim),
+            Colors = colors,
         };
     }
 
@@ -495,29 +509,125 @@ internal sealed class CliOptions
         mode = default;
         return false;
     }
+
+    private static bool TryParseColorPattern(ReadOnlySpan<char> text, out ColorPattern pattern)
+    {
+        if (text.Equals("classic", StringComparison.OrdinalIgnoreCase))
+        {
+            pattern = ColorPattern.Classic;
+            return true;
+        }
+
+        if (text.Equals("resurrections", StringComparison.OrdinalIgnoreCase))
+        {
+            pattern = ColorPattern.Resurrections;
+            return true;
+        }
+
+        if (text.Equals("operator", StringComparison.OrdinalIgnoreCase))
+        {
+            pattern = ColorPattern.Operator;
+            return true;
+        }
+
+        if (text.Equals("twilight", StringComparison.OrdinalIgnoreCase))
+        {
+            pattern = ColorPattern.Twilight;
+            return true;
+        }
+
+        if (text.Equals("rainbow", StringComparison.OrdinalIgnoreCase))
+        {
+            pattern = ColorPattern.Rainbow;
+            return true;
+        }
+
+        pattern = default;
+        return false;
+    }
 }
 
 internal readonly struct ColorOptions(
+    ColorPattern pattern,
     ColorValue background,
     ColorValue head,
     ColorValue bright,
-    ColorValue dim)
+    ColorValue dim,
+    ColorValue? hot = null)
 {
     internal static ColorOptions Default => new(
+        ColorPattern.Classic,
         DefaultBackground,
         DefaultHead,
         DefaultBright,
         DefaultDim);
 
     internal static readonly ColorValue DefaultBackground = new(new Rgb(0, 0, 0)); // #000000
-    internal static readonly ColorValue DefaultHead = new(new Rgb(255, 255, 255)); // #D8FFD8
+    internal static readonly ColorValue DefaultHead = new(new Rgb(255, 255, 255)); // #FFFFFF
     internal static readonly ColorValue DefaultBright = new(new Rgb(48, 255, 88)); // #30FF58
     internal static readonly ColorValue DefaultDim = new(new Rgb(5, 61, 22)); // #053D16
 
+    internal ColorPattern Pattern { get; } = pattern;
     internal ColorValue Background { get; } = background;
     internal ColorValue Head { get; } = head;
     internal ColorValue Bright { get; } = bright;
     internal ColorValue Dim { get; } = dim;
+    internal ColorValue? Hot { get; } = hot;
+
+    internal static ColorOptions Create(ColorPattern pattern, ColorValue? bg, ColorValue? head, ColorValue? bright, ColorValue? dim)
+    {
+        var preset = Preset(pattern);
+        if (pattern == ColorPattern.Rainbow)
+        {
+            return new ColorOptions(
+                pattern,
+                bg ?? preset.Background,
+                preset.Head,
+                preset.Bright,
+                preset.Dim,
+                preset.Hot);
+        }
+
+        return new ColorOptions(
+            pattern,
+            bg ?? preset.Background,
+            head ?? preset.Head,
+            bright ?? preset.Bright,
+            dim ?? preset.Dim,
+            preset.Hot);
+    }
+
+    private static ColorOptions Preset(ColorPattern pattern) =>
+        pattern switch
+        {
+            ColorPattern.Classic => Default,
+            ColorPattern.Resurrections => new ColorOptions(
+                pattern,
+                new ColorValue(new Rgb(1, 10, 2)),       // #010A02
+                new ColorValue(new Rgb(246, 255, 209)),   // #F6FFD1
+                new ColorValue(new Rgb(180, 255, 61)),    // #B4FF3D
+                new ColorValue(new Rgb(43, 83, 13))),     // #2B530D
+            ColorPattern.Operator => new ColorOptions(
+                pattern,
+                DefaultBackground,
+                DefaultHead,
+                DefaultBright,
+                DefaultBright),
+            ColorPattern.Twilight => new ColorOptions(
+                pattern,
+                new ColorValue(new Rgb(2, 8, 32)),        // #020820
+                new ColorValue(new Rgb(255, 250, 96)),    // #FFFA60
+                new ColorValue(new Rgb(255, 38, 184)),    // #FF26B8
+                new ColorValue(new Rgb(42, 18, 76)),      // #2A124C
+                new ColorValue(new Rgb(255, 250, 96))),   // #FFFA60
+            ColorPattern.Rainbow => new ColorOptions(
+                pattern,
+                DefaultBackground,
+                DefaultHead,
+                new ColorValue(new Rgb(255, 0, 0)),
+                new ColorValue(new Rgb(80, 0, 0))),
+            _ => Default,
+        };
 }
 
 internal static class ColorParser
@@ -786,10 +896,10 @@ internal sealed class BrightnessPalette
     private readonly Rgb[] _lut = new Rgb[256];
     private readonly Rgb _head;
 
-    internal BrightnessPalette(Rgb head, Rgb bright, Rgb dim, Rgb bg)
+    internal BrightnessPalette(Rgb head, Rgb bright, Rgb dim, Rgb bg, Rgb? hot = null)
     {
         _head = head;
-        BuildLut(_lut, bright, dim, bg);
+        BuildLut(_lut, bright, dim, bg, hot);
     }
 
     internal ReadOnlySpan<Rgb> Lut => _lut;
@@ -797,10 +907,10 @@ internal sealed class BrightnessPalette
 
     internal Rgb Sample(byte brightnessIndex) => _lut[brightnessIndex];
 
-    private static void BuildLut(Span<Rgb> lut, Rgb bright, Rgb dim, Rgb bg)
+    private static void BuildLut(Span<Rgb> lut, Rgb bright, Rgb dim, Rgb bg, Rgb? hot)
     {
         var vividBright = ScaleRgb(bright, EngineConstants.LutBrightScale);
-        var hotBright = HotBright(vividBright);
+        var hotBright = hot ?? HotBright(vividBright);
         Span<(int index, Rgb rgb)> keyframes = stackalloc (int, Rgb)[4];
         keyframes[0] = (EngineConstants.LutTailFadeEnd, dim);
         keyframes[1] = (EngineConstants.LutDimIndex, dim);
@@ -874,16 +984,27 @@ internal sealed class AnsiPalette
     private readonly byte[] _rowFgReset;
     private readonly byte[] _space = " "u8.ToArray();
     private readonly BrightnessPalette _palette;
+    private readonly BrightnessPalette[]? _columnBandPalettes;
     private readonly bool _trueColor;
     private readonly Rgb _cursorAddend;
+    private readonly Rgb[]? _columnBandCursorAddends;
 
-    private AnsiPalette(byte[] bgRowPrefix, byte[] rowFgReset, BrightnessPalette palette, bool trueColor, Rgb cursorAddend)
+    private AnsiPalette(
+        byte[] bgRowPrefix,
+        byte[] rowFgReset,
+        BrightnessPalette palette,
+        BrightnessPalette[]? columnBandPalettes,
+        bool trueColor,
+        Rgb cursorAddend,
+        Rgb[]? columnBandCursorAddends)
     {
         _bgRowPrefix = bgRowPrefix;
         _rowFgReset = rowFgReset;
         _palette = palette;
+        _columnBandPalettes = columnBandPalettes;
         _trueColor = trueColor;
         _cursorAddend = cursorAddend;
+        _columnBandCursorAddends = columnBandCursorAddends;
     }
 
     internal static AnsiPalette Create(ColorOptions colors, bool trueColor, double cursorIntensity)
@@ -892,7 +1013,8 @@ internal sealed class AnsiPalette
             ResolveRgb(colors.Head),
             ResolveRgb(colors.Bright),
             ResolveRgb(colors.Dim),
-            ResolveRgb(colors.Background));
+            ResolveRgb(colors.Background),
+            colors.Hot is { } hot ? ResolveRgb(hot) : null);
 
         var bgRgb = ResolveRgb(colors.Background);
         var bgNamed = ResolveNamed(colors.Background);
@@ -903,8 +1025,45 @@ internal sealed class AnsiPalette
             ? BuildTrueColorFgPrefix(bgRgb)
             : BuildAnsi16FgPrefix(bgNamed);
 
+        BrightnessPalette[]? columnBandPalettes = null;
+        Rgb[]? columnBandCursorAddends = null;
+        if (colors.Pattern == ColorPattern.Rainbow)
+        {
+            columnBandPalettes = CreateRainbowPalettes(bgRgb);
+            columnBandCursorAddends = new Rgb[columnBandPalettes.Length];
+            for (var i = 0; i < columnBandPalettes.Length; i++)
+                columnBandCursorAddends[i] = BrightnessPalette.ScaleRgb(columnBandPalettes[i].HeadColor, cursorIntensity);
+        }
+
         var cursorAddend = BrightnessPalette.ScaleRgb(palette.HeadColor, cursorIntensity);
-        return new AnsiPalette(bgPrefix, rowFgReset, palette, trueColor, cursorAddend);
+        return new AnsiPalette(bgPrefix, rowFgReset, palette, columnBandPalettes, trueColor, cursorAddend, columnBandCursorAddends);
+    }
+
+    private static BrightnessPalette[] CreateRainbowPalettes(Rgb bg)
+    {
+        ReadOnlySpan<Rgb> brightColors =
+        [
+            new Rgb(255, 36, 36),
+            new Rgb(255, 136, 0),
+            new Rgb(255, 235, 0),
+            new Rgb(38, 222, 68),
+            new Rgb(35, 144, 255),
+            new Rgb(70, 72, 255),
+            new Rgb(168, 70, 255),
+        ];
+
+        var palettes = new BrightnessPalette[brightColors.Length];
+        for (var i = 0; i < brightColors.Length; i++)
+        {
+            var bright = brightColors[i];
+            palettes[i] = new BrightnessPalette(
+                new Rgb(255, 255, 255),
+                bright,
+                BrightnessPalette.ScaleRgb(bright, 0.24),
+                bg);
+        }
+
+        return palettes;
     }
 
     private static Rgb ResolveRgb(ColorValue color) => color.Rgb;
@@ -1031,9 +1190,10 @@ internal sealed class AnsiPalette
                 var brightness = cell.Brightness / 255.0;
                 brightness -= Dither(x, y, frameNumber) * (EngineConstants.DitherMagnitude / 3.0);
                 brightness = Math.Clamp(brightness, 0, 1);
-                var rgb = _palette.Sample((byte)(brightness * 255));
+                var palette = SelectPalette(x, width, out var band);
+                var rgb = palette.Sample((byte)(brightness * 255));
                 if (cell.CursorBoost != 0)
-                    rgb = BrightnessPalette.AddClamped(rgb, _cursorAddend);
+                    rgb = BrightnessPalette.AddClamped(rgb, SelectCursorAddend(band));
 
                 if (_trueColor)
                 {
@@ -1086,6 +1246,25 @@ internal sealed class AnsiPalette
 
     private static int Ansi16FgCode(ConsoleColor16 color) =>
         color <= ConsoleColor16.White ? 30 + (int)color : 90 + ((int)color - 8);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private BrightnessPalette SelectPalette(int x, int width, out int band)
+    {
+        if (_columnBandPalettes is null)
+        {
+            band = -1;
+            return _palette;
+        }
+
+        band = Math.Min(_columnBandPalettes.Length - 1, x * _columnBandPalettes.Length / Math.Max(1, width));
+        return _columnBandPalettes[band];
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private Rgb SelectCursorAddend(int band) =>
+        band >= 0 && _columnBandCursorAddends is not null
+            ? _columnBandCursorAddends[band]
+            : _cursorAddend;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void AppendBytes(byte[] buffer, ref int pos, ReadOnlySpan<byte> bytes)
@@ -1844,6 +2023,7 @@ Usage:
   matrix --mode movie
   matrix --density <0.0-1.0>
   matrix --fps <1-60>
+  matrix --pattern <classic|resurrections|operator|twilight|rainbow>
   matrix --bg <color> --head <color> --bright <color> --dim <color>
   matrix --cursor-intensity <0.5-5.0>
   matrix --shader-bloom <auto|on|off>
@@ -1870,8 +2050,17 @@ Timing:
                 Higher values make rain fall faster in real time (1-2 cells per frame).
 
 Colors:
+  --pattern      Color preset. Default classic.
+                 classic: original trilogy-style green rain.
+                 resurrections: yellow-green Resurrections-style rain.
+                 operator: classic green without a dim trail color.
+                 twilight: classic brightness curve with deep-blue background
+                           and violet/pink/magenta rain.
+                 rainbow: seven vertical color bands from left to right
+                          (red, orange, yellow, green, blue, indigo, violet).
+                          Only --bg overrides this pattern.
   Hex (#RGB or #RRGGBB) or 16-color names (black, green, darkgreen, ...).
-  Defaults: --bg #000000 --head #FFFFFF --bright #30FF58 --dim #00AA1C
+  Defaults: --pattern classic --bg #000000 --head #FFFFFF --bright #30FF58 --dim #053D16
   --cursor-intensity  Head-cell bloom strength (additive --head). Default 2.5.
   --shader-bloom      Terminal GPU bloom (default auto). Auto enables for Windows Terminal,
                       lowering software head bloom to 1.0 unless --cursor-intensity
@@ -1887,6 +2076,8 @@ Examples:
   matrix --mode movie --density 0.8
   matrix --fps 24
   matrix --mode movie --fps 7
+  matrix --pattern resurrections
+  matrix --pattern rainbow --bg #050505
   matrix --bright #0F0 --dim #080
 
 Press any key to exit early. Ctrl+C also exits cleanly.
