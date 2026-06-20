@@ -270,6 +270,7 @@ internal enum ColorPattern
     Resurrections,
     Operator,
     Twilight,
+    Rain,
     Rainbow,
 }
 
@@ -386,7 +387,7 @@ internal sealed class CliOptions
                     if (++i >= args.Length)
                         return Error("missing value for --pattern");
                     if (!TryParseColorPattern(args[i], out pattern))
-                        return Error("invalid --pattern value (expected classic, resurrections, operator, twilight, or rainbow)");
+                        return Error("invalid --pattern value (expected classic, resurrections, operator, twilight, rain, or rainbow)");
                     break;
                 case "--density":
                     if (++i >= args.Length)
@@ -536,6 +537,12 @@ internal sealed class CliOptions
             return true;
         }
 
+        if (text.Equals("rain", StringComparison.OrdinalIgnoreCase))
+        {
+            pattern = ColorPattern.Rain;
+            return true;
+        }
+
         if (text.Equals("rainbow", StringComparison.OrdinalIgnoreCase))
         {
             pattern = ColorPattern.Rainbow;
@@ -620,6 +627,13 @@ internal readonly struct ColorOptions(
                 new ColorValue(new Rgb(255, 38, 184)),    // #FF26B8
                 new ColorValue(new Rgb(42, 18, 76)),      // #2A124C
                 new ColorValue(new Rgb(255, 250, 96))),   // #FFFA60
+            ColorPattern.Rain => new ColorOptions(
+                pattern,
+                new ColorValue(new Rgb(1, 11, 20)),       // #010B14
+                new ColorValue(new Rgb(213, 250, 255)),   // #D5FAFF
+                new ColorValue(new Rgb(53, 196, 226)),    // #35C4E2
+                new ColorValue(new Rgb(7, 45, 68)),       // #072D44
+                new ColorValue(new Rgb(188, 246, 255))),  // #BCF6FF
             ColorPattern.Rainbow => new ColorOptions(
                 pattern,
                 DefaultBackground,
@@ -2023,7 +2037,7 @@ Usage:
   matrix --mode movie
   matrix --density <0.0-1.0>
   matrix --fps <1-60>
-  matrix --pattern <classic|resurrections|operator|twilight|rainbow>
+  matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
   matrix --bg <color> --head <color> --bright <color> --dim <color>
   matrix --cursor-intensity <0.5-5.0>
   matrix --shader-bloom <auto|on|off>
@@ -2056,6 +2070,7 @@ Colors:
                  operator: classic green without a dim trail color.
                  twilight: classic brightness curve with deep-blue background
                            and violet/pink/magenta rain.
+                 rain: blue-cyan rain on a dark rainy-night background.
                  rainbow: seven vertical color bands from left to right
                           (red, orange, yellow, green, blue, indigo, violet).
                           Only --bg overrides this pattern.
@@ -2077,6 +2092,7 @@ Examples:
   matrix --fps 24
   matrix --mode movie --fps 7
   matrix --pattern resurrections
+  matrix --pattern rain
   matrix --pattern rainbow --bg #050505
   matrix --bright #0F0 --dim #080
 
