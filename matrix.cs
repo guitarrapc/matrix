@@ -166,7 +166,7 @@ internal static class EngineConstants
     internal const int DensityActiveBasePercent = 90;
     internal const double MovieDensityBoost = 1.5;
     /// <summary>Average cells a stream travels before deactivating ≈ factor × height (see spawn equilibrium).</summary>
-    internal const double StreamLifetimeHeightFactor = 1.55;
+    internal const double StreamLifetimeHeightFactor = 1.15;
     internal const double AvgFallSpeedCells = (MinSpeed + MaxSpeed) / 2.0;
     /// <summary>Frames to close an active-column deficit when below density target (~0.2s at 14 FPS).</summary>
     internal const int DensityRecoveryFrames = 3;
@@ -196,6 +196,15 @@ internal static class EngineConstants
     internal const float RainWaveMinimum = 0.42f;
     /// <summary>Cap simultaneous stream births so cohorts do not die in sync (~2–3s).</summary>
     internal const int MaxSpawnsPerFrame = 4;
+    internal const int MaxStreamsPerColumn = 2;
+    /// <summary>Begin considering same-column respawn once the head has crossed this screen fraction.</summary>
+    internal const double RecycleStartHeadFraction = 0.50;
+    /// <summary>Screen coverage below this fraction strongly favors immediate same-column respawn.</summary>
+    internal const double RecycleSparseVisibleFraction = 0.28;
+    /// <summary>Screen coverage above this fraction delays respawn until the head is off-screen.</summary>
+    internal const double RecycleDenseVisibleFraction = 0.72;
+    /// <summary>Maximum top-entry delay for recycled streams; initial streams keep the wider stagger.</summary>
+    internal const double RecycleInitialDelayHeightFraction = 0.22;
     /// <summary>Consecutive ticks with the same size before applying a terminal resize.</summary>
     internal const int ResizeStableFrames = 4;
 }
@@ -1244,7 +1253,7 @@ internal sealed class MatrixEngine : IDisposable
             if (!IsStreamColumn(x))
                 continue;
             streamCount++;
-            if (_columns[x].Active)
+            if (IsColumnActive(x))
                 activeCount++;
         }
 
@@ -1347,6 +1356,21 @@ internal sealed class MatrixEngine : IDisposable
     private bool IsStreamColumn(int x) =>
         !_wideColumns || ((x & 1) == 0 && x + 1 < _width);
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int StreamIndex(int x, int slot) =>
+        x * EngineConstants.MaxStreamsPerColumn + slot;
+
+    private bool IsColumnActive(int x)
+    {
+        for (var slot = 0; slot < EngineConstants.MaxStreamsPerColumn; slot++)
+        {
+            if (_columns[StreamIndex(x, slot)].Active)
+                return true;
+        }
+
+        return false;
+    }
+
     internal void Render(Stream stdout)
     {
         var needed = _width * _height * 72 + _height * 24 + 96;
@@ -1378,12 +1402,13 @@ internal sealed class MatrixEngine : IDisposable
         _pendingResizeStable = EngineConstants.ResizeStableFrames;
         UpdateDensityChances();
         _grid = ArrayPool<Cell>.Shared.Rent(_width * _height);
-        _columns = ArrayPool<ColumnState>.Shared.Rent(_width);
+        _columns = ArrayPool<ColumnState>.Shared.Rent(_width * EngineConstants.MaxStreamsPerColumn);
         Array.Clear(_grid, 0, _width * _height);
 
         for (var x = 0; x < _width; x++)
         {
-            _columns[x] = default;
+            for (var slot = 0; slot < EngineConstants.MaxStreamsPerColumn; slot++)
+                _columns[StreamIndex(x, slot)] = default;
             if (IsStreamColumn(x) && RollPercent(_activeChancePercent))
                 ActivateColumn(x);
         }
@@ -1395,35 +1420,53 @@ internal sealed class MatrixEngine : IDisposable
 
     private void UpdateColumn(int x)
     {
-        ref var column = ref _columns[x];
-        if (!column.Active)
+        ClearColumn(x);
+
+        var activeCount = 0;
+        var freeSlot = -1;
+        for (var slot = 0; slot < EngineConstants.MaxStreamsPerColumn; slot++)
         {
-            if (_spawnsThisFrame < EngineConstants.MaxSpawnsPerFrame &&
-                RollPercent(_spawnChancePercent))
-            {
-                ActivateColumn(x);
-                _spawnsThisFrame++;
-            }
-            return;
+            ref var stream = ref _columns[StreamIndex(x, slot)];
+            if (stream.Active)
+                activeCount++;
+            else if (freeSlot < 0)
+                freeSlot = slot;
         }
 
-        var speed = column.Speed;
-        ShiftColumnDown(x, speed);
-        column.HeadY += speed;
+        if (freeSlot >= 0 && _spawnsThisFrame < EngineConstants.MaxSpawnsPerFrame)
+        {
+            if (activeCount == 0 && RollPercent(_spawnChancePercent))
+            {
+                ActivateColumn(x, freeSlot);
+                _spawnsThisFrame++;
+            }
+            else if (activeCount > 0 && ShouldRecycleColumn(x) && RollPercent(_spawnChancePercent))
+            {
+                ActivateColumn(x, freeSlot, recycled: true);
+                _spawnsThisFrame++;
+            }
+        }
+
+        for (var slot = 0; slot < EngineConstants.MaxStreamsPerColumn; slot++)
+            UpdateStream(x, slot);
+    }
+
+    private void UpdateStream(int x, int slot)
+    {
+        ref var column = ref _columns[StreamIndex(x, slot)];
+        if (!column.Active)
+            return;
+
+        column.HeadY += column.Speed;
 
         var trailTop = column.HeadY - column.TrailLength + 1;
         if (trailTop > _height - 1)
         {
-            ClearColumn(x);
             column.Active = false;
             return;
         }
 
         var headY = column.HeadY;
-        var clearAboveEnd = Math.Min(trailTop, _height);
-        for (var y = 0; y < clearAboveEnd; y++)
-            ClearDisplayCells(x, y);
-
         var updateStart = Math.Max(0, trailTop);
         var updateEnd = Math.Min(headY, _height - 1);
         for (var y = updateStart; y <= updateEnd; y++)
@@ -1445,9 +1488,6 @@ internal sealed class MatrixEngine : IDisposable
             var brightnessByte = (byte)Math.Clamp((int)(brightness * 255), 0, 255);
             SetDisplayGlyph(x, y, cell.Glyph, brightnessByte, cursorBoost);
         }
-
-        for (var y = Math.Max(headY + 1, 0); y < _height; y++)
-            ClearDisplayCells(x, y);
     }
 
     /// <summary>1 at Head, 0 at trail tip. Gamma &lt; 1 keeps mid-trail brighter while the tip still fades out.</summary>
@@ -1473,10 +1513,13 @@ internal sealed class MatrixEngine : IDisposable
     private void SetDisplayGlyph(int x, int y, char glyph, byte brightness, byte cursorBoost)
     {
         ref var cell = ref _grid[y * _width + x];
+        if (cell.State == (byte)CellState.Glyph && brightness < cell.Brightness && cursorBoost <= cell.CursorBoost)
+            return;
+
         cell.State = (byte)CellState.Glyph;
         cell.Glyph = glyph;
         cell.Brightness = brightness;
-        cell.CursorBoost = cursorBoost;
+        cell.CursorBoost = Math.Max(cell.CursorBoost, cursorBoost);
         if (_wideColumns && x + 1 < _width)
         {
             ref var cont = ref _grid[y * _width + x + 1];
@@ -1504,28 +1547,50 @@ internal sealed class MatrixEngine : IDisposable
         }
     }
 
-    private void ShiftColumnDown(int x, int speed)
+    private bool ShouldRecycleColumn(int x)
     {
-        if (speed <= 0)
-            return;
+        if (_height <= 0)
+            return false;
 
-        var span = _wideColumns ? 2 : 1;
-        var limit = Math.Min(speed, _height);
-        for (var y = _height - 1; y >= limit; y--)
+        var visibleCells = 0;
+        var headY = int.MinValue;
+        for (var slot = 0; slot < EngineConstants.MaxStreamsPerColumn; slot++)
         {
-            for (var dx = 0; dx < span && x + dx < _width; dx++)
-            {
-                ref var dest = ref _grid[y * _width + x + dx];
-                ref var src = ref _grid[(y - limit) * _width + x + dx];
-                dest = src;
-            }
+            ref var column = ref _columns[StreamIndex(x, slot)];
+            if (!column.Active)
+                continue;
+
+            headY = Math.Max(headY, column.HeadY);
+            var trailTop = column.HeadY - column.TrailLength + 1;
+            var visibleStart = Math.Max(0, trailTop);
+            var visibleEnd = Math.Min(column.HeadY, _height - 1);
+            if (visibleEnd >= visibleStart)
+                visibleCells += visibleEnd - visibleStart + 1;
         }
 
-        for (var y = 0; y < limit; y++)
-            ClearDisplayCells(x, y);
+        var recycleStart = (int)Math.Round(_height * EngineConstants.RecycleStartHeadFraction);
+        if (headY < recycleStart)
+            return false;
+
+        var visibleFraction = Math.Min(1.0, visibleCells / (double)_height);
+        var progress = Math.Clamp((headY - recycleStart) / (double)Math.Max(1, _height - recycleStart), 0.0, 1.0);
+
+        if (visibleFraction <= EngineConstants.RecycleSparseVisibleFraction)
+            return RollPercent((int)Math.Round(35 + progress * 50));
+
+        if (visibleFraction >= EngineConstants.RecycleDenseVisibleFraction && headY <= _height - 1)
+            return false;
+
+        var coverageDelay = Math.Clamp(
+            (visibleFraction - EngineConstants.RecycleSparseVisibleFraction) /
+            (EngineConstants.RecycleDenseVisibleFraction - EngineConstants.RecycleSparseVisibleFraction),
+            0.0,
+            1.0);
+        var chance = Math.Clamp((progress - coverageDelay * 0.45) * 60, 0, 65);
+        return RollPercent((int)Math.Round(chance));
     }
 
-    private void ActivateColumn(int x)
+    private void ActivateColumn(int x, int slot = 0, bool recycled = false)
     {
         var minTrail = (int)Math.Round(
             Math.Max(EngineConstants.MinTrailCells, _height * EngineConstants.TrailMinHeightFraction) * _trailLengthBoost);
@@ -1535,10 +1600,10 @@ internal sealed class MatrixEngine : IDisposable
         minTrail = Math.Min(minTrail, maxTrail);
         var speed = (byte)_rng.Next(EngineConstants.MinSpeed, EngineConstants.MaxSpeed + 1);
 
-        _columns[x] = new ColumnState
+        _columns[StreamIndex(x, slot)] = new ColumnState
         {
             Active = true,
-            HeadY = -_rng.Next(0, Math.Max(1, _height)),
+            HeadY = -_rng.Next(0, Math.Max(1, recycled ? (int)Math.Round(_height * EngineConstants.RecycleInitialDelayHeightFraction) : _height)),
             Speed = speed,
             TrailLength = _rng.Next(minTrail, maxTrail + 1),
             TimeOffset = RainBrightness.ColumnTimeOffset(x),
