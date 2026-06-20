@@ -154,6 +154,7 @@ internal static class EngineConstants
     internal const int MinSpeed = 1;
     internal const int MaxSpeed = 2;
     internal const double DefaultDensity = 0.55;
+    internal const double DefaultMovieDensity = 0.7;
     internal const int DensityActiveBasePercent = 55;
     internal const int DensitySpawnBasePercent = 6;
     internal const double MovieDensityBoost = 1.5;
@@ -236,6 +237,7 @@ internal sealed class CliOptions
         var singleChar = '0';
         var duration = 5.0;
         var density = EngineConstants.DefaultDensity;
+        var hasDensityFlag = false;
         var hasDurationFlag = false;
         var hasPositionalDuration = false;
         ColorValue? bg = null, head = null, bright = null, dim = null;
@@ -307,6 +309,7 @@ internal sealed class CliOptions
                         return Error("missing value for --density");
                     if (!TryParseDensity(args[i], out density))
                         return Error("invalid --density value (expected 0.0 to 1.0)");
+                    hasDensityFlag = true;
                     break;
                 default:
                     if (arg.StartsWith('-'))
@@ -328,6 +331,9 @@ internal sealed class CliOptions
             mode = GlyphMode.Single;
         else if (hasMovie)
             mode = GlyphMode.Movie;
+
+        if (!hasDensityFlag && mode == GlyphMode.Movie)
+            density = EngineConstants.DefaultMovieDensity;
 
         return new CliOptions
         {
@@ -1486,7 +1492,8 @@ Modes:
   --mode movie  full-width katakana-heavy pool with digits, kanji, symbols (UTF-8 required)
 
 Density:
-  --density     Rain density from 0.0 (sparse) to 1.0 (dense). Default 0.55.
+  --density     Rain density from 0.0 (sparse) to 1.0 (dense).
+                Default 0.55 (ascii-matrix / single). Default 0.7 (movie).
                 Movie mode applies a 1.5x effective boost (capped at 1.0).
 
 Colors:

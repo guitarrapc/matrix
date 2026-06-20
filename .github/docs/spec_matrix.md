@@ -57,7 +57,7 @@ True Color terminals use 24-bit ANSI; others fall back to the nearest 16-color n
 | Parameter | Value |
 |---|---|
 | FPS | 14 |
-| `--density` | 0.0–1.0, default **0.55** |
+| `--density` | 0.0–1.0; default **0.55** (ascii-matrix / single), **0.7** (movie) |
 | Trail length | height × 0.15 … 0.90 per stream (min 4 cells) |
 | Fall speed | 1–2 cells/frame per column |
 | Glyph mutation | ~35% per frame per visible stream cell |
