@@ -70,7 +70,8 @@ catch (InvalidOperationException ex)
 }
 
 var palette = AnsiPalette.Create(options.Colors, useTrueColor, options.CursorIntensity);
-var engine = new MatrixEngine(pool, palette, options.Density);
+var engine = new MatrixEngine(pool, palette, options.Density, options.Fps);
+var frameDelayMs = 1000.0 / options.Fps;
 
 var restore = TerminalSession.Enter(keyExitEnabled);
 var exitRequested = false;
@@ -102,7 +103,7 @@ try
         var frameStart = Stopwatch.GetTimestamp();
         engine.Render(stdout);
         var frameMs = (Stopwatch.GetTimestamp() - frameStart) * 1000.0 / Stopwatch.Frequency;
-        var sleepMs = Math.Max(0, EngineConstants.FrameDelayMs - (int)Math.Round(frameMs));
+        var sleepMs = Math.Max(0, (int)Math.Round(frameDelayMs - frameMs));
         Thread.Sleep(sleepMs);
     }
 }
@@ -150,8 +151,9 @@ internal enum CellState : byte
 
 internal static class EngineConstants
 {
-    internal const int TargetFps = 14;
-    internal const int FrameDelayMs = 1000 / TargetFps;
+    internal const int DefaultTargetFps = 14;
+    internal const int MinTargetFps = 1;
+    internal const int MaxTargetFps = 60;
     internal const int GlyphMutationChance = 35;
     internal const int MinSpeed = 1;
     internal const int MaxSpeed = 2;
@@ -246,6 +248,7 @@ internal sealed class CliOptions
     internal ColorOptions Colors { get; private init; } = ColorOptions.Default;
     internal double Density { get; private init; } = EngineConstants.DefaultDensity;
     internal double CursorIntensity { get; private init; } = EngineConstants.DefaultCursorIntensity;
+    internal int Fps { get; private init; } = EngineConstants.DefaultTargetFps;
 
     internal static CliOptions Parse(string[] args)
     {
@@ -260,6 +263,7 @@ internal sealed class CliOptions
         var hasPositionalDuration = false;
         ColorValue? bg = null, head = null, bright = null, dim = null;
         var cursorIntensity = EngineConstants.DefaultCursorIntensity;
+        var fps = EngineConstants.DefaultTargetFps;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -336,6 +340,12 @@ internal sealed class CliOptions
                     if (!TryParseCursorIntensity(args[i], out cursorIntensity))
                         return Error("invalid --cursor-intensity value (expected 0.5 to 5.0)");
                     break;
+                case "--fps":
+                    if (++i >= args.Length)
+                        return Error("missing value for --fps");
+                    if (!TryParseFps(args[i], out fps))
+                        return Error($"invalid --fps value (expected {EngineConstants.MinTargetFps} to {EngineConstants.MaxTargetFps})");
+                    break;
                 default:
                     if (arg.StartsWith('-'))
                         return Error($"unknown option: {arg}");
@@ -367,6 +377,7 @@ internal sealed class CliOptions
             DurationSeconds = duration,
             Density = density,
             CursorIntensity = cursorIntensity,
+            Fps = fps,
             Colors = new ColorOptions(
                 bg ?? ColorOptions.DefaultBackground,
                 head ?? ColorOptions.DefaultHead,
@@ -397,6 +408,14 @@ internal sealed class CliOptions
         if (!double.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out intensity))
             return false;
         return intensity is >= 0.5 and <= 5.0;
+    }
+
+    private static bool TryParseFps(ReadOnlySpan<char> text, out int fps)
+    {
+        fps = 0;
+        if (!int.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out fps))
+            return false;
+        return fps is >= EngineConstants.MinTargetFps and <= EngineConstants.MaxTargetFps;
     }
 }
 
@@ -1090,11 +1109,13 @@ internal sealed class MatrixEngine
     private int _pendingResizeHeight;
     private int _pendingResizeStable;
     private int _spawnsThisFrame;
+    private readonly int _targetFps;
 
-    internal MatrixEngine(GlyphPool pool, AnsiPalette palette, double density)
+    internal MatrixEngine(GlyphPool pool, AnsiPalette palette, double density, int targetFps)
     {
         _pool = pool;
         _palette = palette;
+        _targetFps = targetFps;
         _wideColumns = pool.RequiresWideColumns;
 
         var effectiveDensity = Math.Clamp(density, 0, 1);
@@ -1217,7 +1238,7 @@ internal sealed class MatrixEngine
             UpdateColumn(x);
         }
 
-        _simTime += 1.0 / EngineConstants.TargetFps;
+        _simTime += 1.0 / _targetFps;
         _frameNumber++;
     }
 
@@ -1618,6 +1639,7 @@ Usage:
   matrix --char <character>
   matrix --mode movie
   matrix --density <0.0-1.0>
+  matrix --fps <1-60>
   matrix --bg <color> --head <color> --bright <color> --dim <color>
   matrix --cursor-intensity <0.5-5.0>
   matrix --help
@@ -1636,6 +1658,10 @@ Density:
                 Default 0.55 (ascii-matrix / single). Default 0.7 (movie).
                 Movie mode applies a 1.5x effective boost (capped at 1.0).
 
+Timing:
+  --fps         Frames per second (1-60). Default 14.
+                Higher values make rain fall faster in real time (1-2 cells per frame).
+
 Colors:
   Hex (#RGB or #RRGGBB) or 16-color names (black, green, darkgreen, ...).
   Defaults: --bg #000000 --head #FFFFFF --bright #30FF58 --dim #00AA1C
@@ -1648,6 +1674,8 @@ Examples:
   matrix --char '#'
   matrix --mode movie 30
   matrix --mode movie --density 0.8
+  matrix --fps 24
+  matrix --mode movie --fps 7
   matrix --bright #0F0 --dim #080
 
 Press any key to exit early. Ctrl+C also exits cleanly.

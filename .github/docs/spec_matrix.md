@@ -50,7 +50,7 @@ True Color terminals use 24-bit ANSI; others fall back to the nearest 16-color n
 
 ### Presentation
 
-- ~**14 FPS**; alternate screen; hidden cursor; restore terminal on exit (no farewell message).
+- **`--fps`** (default **14**, range 1–60) sets frame rate; rain falls **1–2 cells per frame**, so higher FPS means faster motion in real time and a faster wave pulse. Lower FPS for a calmer effect (useful on slow integrated terminals).
 - Recalculate grid on resize when the environment allows (stable size for several consecutive frames).
 - Full-frame redraw uses synchronized output when the terminal accepts it; avoid `\n`-chained full-screen updates on slow integrated terminals.
 
@@ -58,8 +58,9 @@ True Color terminals use 24-bit ANSI; others fall back to the nearest 16-color n
 
 | Parameter | Value |
 |---|---|
-| FPS | 14 |
+| FPS (`--fps`) | **14** (1–60) |
 | `--density` | 0.0–1.0; default **0.55** (ascii-matrix / single), **0.7** (movie) |
+| `--fps` | **1–60**; default **14**. Scales refresh rate and real-time fall speed (columns still move 1–2 cells per frame). |
 | Trail length | height × **0.30** … 0.90 per stream (min **10** cells) |
 | Fall speed | 1–2 cells/frame per column |
 | Glyph mutation | ~35% per frame per visible stream cell |
@@ -103,6 +104,7 @@ matrix --duration <seconds>
 matrix --char <character>
 matrix --mode movie
 matrix --density <0.0-1.0>
+matrix --fps <1-60>
 matrix --bg <color> --head <color> --bright <color> --dim <color>
 matrix --cursor-intensity <0.5-5.0>
 matrix --help
