@@ -1,4 +1,4 @@
-#:sdk Microsoft.NET.Sdk
+﻿#:sdk Microsoft.NET.Sdk
 #:property TargetFramework=net10.0
 #:property Version=1.0.0
 #:property Nullable=enable
@@ -495,10 +495,10 @@ internal readonly struct ColorOptions(
         DefaultBright,
         DefaultDim);
 
-    internal static readonly ColorValue DefaultBackground = new(new Rgb(0, 0, 0));
-    internal static readonly ColorValue DefaultHead = new(new Rgb(255, 255, 255));
-    internal static readonly ColorValue DefaultBright = new(new Rgb(48, 255, 88));
-    internal static readonly ColorValue DefaultDim = new(new Rgb(0, 170, 28));
+    internal static readonly ColorValue DefaultBackground = new(new Rgb(0, 0, 0)); // #000000
+    internal static readonly ColorValue DefaultHead = new(new Rgb(255, 255, 255)); // #D8FFD8
+    internal static readonly ColorValue DefaultBright = new(new Rgb(48, 255, 88)); // #30FF58
+    internal static readonly ColorValue DefaultDim = new(new Rgb(5, 61, 22)); // #053D16
 
     internal ColorValue Background { get; } = background;
     internal ColorValue Head { get; } = head;
