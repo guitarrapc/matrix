@@ -64,7 +64,7 @@ True Color terminals use 24-bit ANSI; others fall back to the nearest 16-color n
 | Glyph mutation | ~35% per frame per visible stream cell |
 | Movie density | effective density × **1.5** (cap 1.0) |
 | Initial active columns | effective density × **80%** at start / resize (`density 1.0` → **80%** of stream columns) |
-| Spawn (inactive columns) | **equilibrium** — per-frame % derived from terminal height so steady active fraction ≈ initial active chance |
+| Spawn (inactive columns) | **Adaptive** — baseline from average stream lifetime; **raised** when active streams fall below the `density` target (trail length and speed vary per column) |
 
 ---
 
@@ -171,7 +171,7 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 - **Decision:** even anchor columns, full-width glyphs only, Continuation cell for the second display cell.
 - **Pitfall:** emitting a **space** on Continuation cells caused cursor drift and crooked lines — Continuation must write **zero bytes**.
 - **Glyph mix:** katakana-only was too plain vs the film. Expanded to full-width digits, five kanji (`日三二一十`), and symbols — still **80% katakana** so the mix reads as “occasional” not “character soup.” Half-width katakana was rejected (would forfeit the two-cell grid or reintroduce width mixing). Standalone `゛` `゜` are not guaranteed two cells in Unicode; kept as a trial.
-- **Spawn rate vs density:** a fixed `density × N%` spawn under-filled the screen after the first stream cycle. Steady-state spawn is now computed from average stream lifetime (~terminal height) so the long-run active column fraction matches the initial `density × 80%` target.
+- **Spawn rate vs density:** fixed per-frame spawn could not match variable stream lifetimes (random trail length, speed, staggered deaths). Steady-state uses a height-based baseline; each frame, if active streams are **below** the `density × 80%` target, spawn probability **increases** to close the gap within ~0.5s.
 
 ### Color model evolution
 

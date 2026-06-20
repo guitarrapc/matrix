@@ -160,6 +160,8 @@ internal static class EngineConstants
     /// <summary>Average cells a stream travels before deactivating ≈ factor × height (see spawn equilibrium).</summary>
     internal const double StreamLifetimeHeightFactor = 1.85;
     internal const double AvgFallSpeedCells = (MinSpeed + MaxSpeed) / 2.0;
+    /// <summary>Frames to close an active-column deficit when below density target (~0.5s at 14 FPS).</summary>
+    internal const int DensityRecoveryFrames = 7;
     internal const double TrailMinHeightFraction = 0.30;
     internal const double TrailMaxHeightFraction = 0.90;
     internal const int MinTrailCells = 10;
@@ -987,6 +989,7 @@ internal sealed class MatrixEngine
     private readonly bool _wideColumns;
     private readonly double _effectiveDensity;
     private int _activeChancePercent;
+    private int _baseSpawnChancePercent;
     private int _spawnChancePercent;
     private readonly Random _rng = new();
 
@@ -1015,7 +1018,54 @@ internal sealed class MatrixEngine
     private void UpdateDensityChances()
     {
         _activeChancePercent = Math.Min(100, (int)(_effectiveDensity * EngineConstants.DensityActiveBasePercent));
-        _spawnChancePercent = ComputeEquilibriumSpawnPercent(_activeChancePercent, _height);
+        _baseSpawnChancePercent = ComputeEquilibriumSpawnPercent(_activeChancePercent, _height);
+        _spawnChancePercent = _baseSpawnChancePercent;
+    }
+
+    /// <summary>Raise spawn when active streams fall below the density target (variable lifetimes cause drift).</summary>
+    private void RefreshAdaptiveSpawnChance()
+    {
+        var streamCount = 0;
+        var activeCount = 0;
+        for (var x = 0; x < _width; x++)
+        {
+            if (!IsStreamColumn(x))
+                continue;
+            streamCount++;
+            if (_columns[x].Active)
+                activeCount++;
+        }
+
+        if (streamCount == 0 || _activeChancePercent <= 0)
+        {
+            _spawnChancePercent = 0;
+            return;
+        }
+
+        if (_activeChancePercent >= 100)
+        {
+            _spawnChancePercent = 100;
+            return;
+        }
+
+        var targetActive = (int)Math.Round(_activeChancePercent / 100.0 * streamCount);
+        var deficit = targetActive - activeCount;
+        if (deficit <= 0)
+        {
+            _spawnChancePercent = _baseSpawnChancePercent;
+            return;
+        }
+
+        var inactive = streamCount - activeCount;
+        if (inactive <= 0)
+        {
+            _spawnChancePercent = 100;
+            return;
+        }
+
+        var neededPerFrame = deficit / (double)EngineConstants.DensityRecoveryFrames;
+        var adaptivePercent = (int)Math.Ceiling(neededPerFrame / inactive * 100);
+        _spawnChancePercent = Math.Min(100, Math.Max(_baseSpawnChancePercent, adaptivePercent));
     }
 
     /// <summary>Per-frame spawn % so steady active fraction ≈ initial active chance (births = deaths).</summary>
@@ -1046,6 +1096,8 @@ internal sealed class MatrixEngine
 
         if (width != _width || height != _height)
             Resize(width, height);
+
+        RefreshAdaptiveSpawnChance();
 
         for (var x = 0; x < _width; x++)
         {
