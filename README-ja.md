@@ -42,7 +42,7 @@ matrix --mode <ascii|movie>
 matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
 
 # カスタム色には #RGB、#RRGGBB、または16色の色名を指定できます。
-# True Color が利用できない場合は、基本的なターミナルパレットにフォールバックします。
+# フォールバック順は hex True Color、近似16色パレット、色なし ASCII です。
 matrix --bg "#080300" --head "#FFF3D0" --bright "#FF9F1A" --dim "#5A2100"
 
 # ソフトウェア側の head bloom とターミナルの GPU シェーダーを調整します。デフォルトは auto です。

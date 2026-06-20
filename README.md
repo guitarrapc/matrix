@@ -42,7 +42,7 @@ matrix --mode <ascii|movie>
 matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
 
 # Custom colors accept #RGB, #RRGGBB, or 16-color names.
-# If true color is unavailable, matrix falls back to a basic terminal palette.
+# Fallback order is hex true color, nearest 16-color palette, then colorless ASCII.
 matrix --bg "#080300" --head "#FFF3D0" --bright "#FF9F1A" --dim "#5A2100"
 
 # Coordinate software head bloom with a terminal GPU shader. Default is auto.

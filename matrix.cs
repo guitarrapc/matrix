@@ -47,10 +47,14 @@ if (Console.IsOutputRedirected)
 }
 
 var terminal = TerminalProfile.Detect();
-var useTrueColor = TerminalCapabilities.EnableVirtualTerminalIfNeeded() && TerminalCapabilities.SupportsTrueColor();
-if (!useTrueColor)
+var colorMode = TerminalCapabilities.ResolveColorMode();
+if (colorMode == TerminalColorMode.Ansi16)
 {
     Console.Error.WriteLine("warning: true color not supported; falling back to 16-color palette");
+}
+else if (colorMode == TerminalColorMode.None)
+{
+    Console.Error.WriteLine("warning: ANSI color not supported; falling back to colorless ASCII output");
 }
 
 ShaderBloomSupport.WriteStartupNotes(options, terminal);
@@ -75,7 +79,7 @@ catch (InvalidOperationException ex)
     return;
 }
 
-var palette = AnsiPalette.Create(options.Colors, useTrueColor, cursorIntensity);
+var palette = AnsiPalette.Create(options.Colors, colorMode, cursorIntensity);
 using var engine = new MatrixEngine(pool, palette, options.Density, options.Fps);
 var frameDelayMs = 1000.0 / options.Fps;
 
@@ -236,6 +240,13 @@ internal enum ConsoleColor16 : byte
     Magenta = 13,
     Yellow = 14,
     White = 15,
+}
+
+internal enum TerminalColorMode
+{
+    None,
+    Ansi16,
+    TrueColor,
 }
 
 internal readonly struct ColorValue
@@ -819,6 +830,17 @@ internal static class ShaderBloomSupport
 
 internal static class TerminalCapabilities
 {
+    internal static TerminalColorMode ResolveColorMode()
+    {
+        if (!EnableVirtualTerminalIfNeeded())
+            return TerminalColorMode.None;
+
+        if (SupportsTrueColor())
+            return TerminalColorMode.TrueColor;
+
+        return TerminalColorMode.Ansi16;
+    }
+
     internal static bool EnableVirtualTerminalIfNeeded()
     {
         if (!OperatingSystem.IsWindows())
@@ -1001,7 +1023,7 @@ internal sealed class AnsiPalette
     private readonly byte[] _space = " "u8.ToArray();
     private readonly BrightnessPalette _palette;
     private readonly BrightnessPalette[]? _columnBandPalettes;
-    private readonly bool _trueColor;
+    private readonly TerminalColorMode _colorMode;
     private readonly Rgb _cursorAddend;
     private readonly Rgb[]? _columnBandCursorAddends;
 
@@ -1010,7 +1032,7 @@ internal sealed class AnsiPalette
         byte[] rowFgReset,
         BrightnessPalette palette,
         BrightnessPalette[]? columnBandPalettes,
-        bool trueColor,
+        TerminalColorMode colorMode,
         Rgb cursorAddend,
         Rgb[]? columnBandCursorAddends)
     {
@@ -1018,12 +1040,12 @@ internal sealed class AnsiPalette
         _rowFgReset = rowFgReset;
         _palette = palette;
         _columnBandPalettes = columnBandPalettes;
-        _trueColor = trueColor;
+        _colorMode = colorMode;
         _cursorAddend = cursorAddend;
         _columnBandCursorAddends = columnBandCursorAddends;
     }
 
-    internal static AnsiPalette Create(ColorOptions colors, bool trueColor, double cursorIntensity)
+    internal static AnsiPalette Create(ColorOptions colors, TerminalColorMode colorMode, double cursorIntensity)
     {
         var palette = new BrightnessPalette(
             ResolveRgb(colors.Head),
@@ -1034,12 +1056,18 @@ internal sealed class AnsiPalette
 
         var bgRgb = ResolveRgb(colors.Background);
         var bgNamed = ResolveNamed(colors.Background);
-        var bgPrefix = trueColor
-            ? BuildTrueColorBgPrefix(bgRgb)
-            : BuildAnsi16BgPrefix(bgNamed);
-        var rowFgReset = trueColor
-            ? BuildTrueColorFgPrefix(bgRgb)
-            : BuildAnsi16FgPrefix(bgNamed);
+        var bgPrefix = colorMode switch
+        {
+            TerminalColorMode.TrueColor => BuildTrueColorBgPrefix(bgRgb),
+            TerminalColorMode.Ansi16 => BuildAnsi16BgPrefix(bgNamed),
+            _ => [],
+        };
+        var rowFgReset = colorMode switch
+        {
+            TerminalColorMode.TrueColor => BuildTrueColorFgPrefix(bgRgb),
+            TerminalColorMode.Ansi16 => BuildAnsi16FgPrefix(bgNamed),
+            _ => [],
+        };
 
         BrightnessPalette[]? columnBandPalettes = null;
         Rgb[]? columnBandCursorAddends = null;
@@ -1052,7 +1080,7 @@ internal sealed class AnsiPalette
         }
 
         var cursorAddend = BrightnessPalette.ScaleRgb(palette.HeadColor, cursorIntensity);
-        return new AnsiPalette(bgPrefix, rowFgReset, palette, columnBandPalettes, trueColor, cursorAddend, columnBandCursorAddends);
+        return new AnsiPalette(bgPrefix, rowFgReset, palette, columnBandPalettes, colorMode, cursorAddend, columnBandCursorAddends);
     }
 
     private static BrightnessPalette[] CreateRainbowPalettes(Rgb bg)
@@ -1211,7 +1239,7 @@ internal sealed class AnsiPalette
                 if (cell.CursorBoost != 0)
                     rgb = BrightnessPalette.AddClamped(rgb, SelectCursorAddend(band));
 
-                if (_trueColor)
+                if (_colorMode == TerminalColorMode.TrueColor)
                 {
                     if (!hasLastFgRgb || rgb.R != lastFgRgb.R || rgb.G != lastFgRgb.G || rgb.B != lastFgRgb.B)
                     {
@@ -1221,7 +1249,7 @@ internal sealed class AnsiPalette
                         hasLastFgRgb = true;
                     }
                 }
-                else
+                else if (_colorMode == TerminalColorMode.Ansi16)
                 {
                     if (!hasLastFgRgb || rgb.R != lastFgRgb.R || rgb.G != lastFgRgb.G || rgb.B != lastFgRgb.B)
                     {
