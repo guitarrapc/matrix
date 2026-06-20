@@ -646,11 +646,10 @@ internal readonly struct TerminalProfile
 {
     internal bool IsParTerm { get; init; }
     internal bool IsWindowsTerminal { get; init; }
-    internal bool SupportsTerminalShaders => IsParTerm || IsWindowsTerminal;
+    internal bool SupportsTerminalShaders => IsWindowsTerminal;
 
     internal static TerminalProfile Detect() => new()
     {
-        IsParTerm = string.Equals(Environment.GetEnvironmentVariable("__PAR_TERM"), "1", StringComparison.Ordinal),
         IsWindowsTerminal = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_SESSION")),
     };
 }
@@ -661,15 +660,6 @@ internal static class ShaderBloomSupport
     {
         if (!options.IsShaderBloomActive(terminal))
             return;
-
-        if (terminal.IsParTerm)
-        {
-            Console.Error.WriteLine(
-                "note: par-term + shader-bloom: set custom_shader to bloom.glsl (install-shaders) " +
-                "or bloom-matrix.glsl with custom_shader_full_content: true. " +
-                "See shaders/par-term/config.example.yaml.");
-            return;
-        }
 
         if (terminal.IsWindowsTerminal)
         {
@@ -682,7 +672,7 @@ internal static class ShaderBloomSupport
         }
 
         Console.Error.WriteLine(
-            "warning: --shader-bloom active but terminal is not par-term or Windows Terminal; " +
+            "warning: --shader-bloom active but terminal is not Windows Terminal; " +
             "software head bloom is reduced — enable a terminal shader for the full effect.");
     }
 }
@@ -1800,9 +1790,9 @@ Colors:
   Hex (#RGB or #RRGGBB) or 16-color names (black, green, darkgreen, ...).
   Defaults: --bg #000000 --head #FFFFFF --bright #30FF58 --dim #00AA1C
   --cursor-intensity  Head-cell bloom strength (additive --head). Default 2.5.
-  --shader-bloom      Terminal GPU bloom (default auto). Auto enables for par-term and
-                      Windows Terminal, lowering software head bloom to 1.0 unless
-                      --cursor-intensity is set. WT: toggle shader effects in the
+  --shader-bloom      Terminal GPU bloom (default auto). Auto enables for Windows Terminal,
+                      lowering software head bloom to 1.0 unless --cursor-intensity
+                      is set. WT: toggle shader effects in the
                       command palette after setting experimental.pixelShaderPath.
 
 Examples:
