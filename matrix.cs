@@ -1,6 +1,6 @@
 ﻿#:sdk Microsoft.NET.Sdk
 #:property TargetFramework=net10.0
-#:property Version=1.0.0
+#:property Version=0.1.0
 #:property Nullable=enable
 #:property ImplicitUsings=enable
 #:property PublishAot=true
@@ -14,7 +14,9 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 
-if (TryHandleEarlyExit(args))
+const string VersionString = "0.1.0";
+
+if (TryHandleEarlyExit(args, VersionString))
     return;
 
 var options = CliOptions.Parse(args);
@@ -27,7 +29,7 @@ if (options.ShowHelp)
 if (options.ShowVersion)
 {
     Console.Out.Write("matrix ");
-    Console.Out.WriteLine(System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.0.0");
+    Console.Out.WriteLine(System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? VersionString);
     return;
 }
 
@@ -118,7 +120,7 @@ finally
 
 return;
 
-static bool TryHandleEarlyExit(string[] args)
+static bool TryHandleEarlyExit(string[] args, string defaultVersion)
 {
     for (var i = 0; i < args.Length; i++)
     {
@@ -131,7 +133,7 @@ static bool TryHandleEarlyExit(string[] args)
         if (args[i] is "--version" or "-V")
         {
             Console.Out.Write("matrix ");
-            Console.Out.WriteLine(System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.0.0");
+            Console.Out.WriteLine(System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? defaultVersion);
             return true;
         }
     }
