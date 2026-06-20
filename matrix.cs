@@ -70,7 +70,7 @@ catch (InvalidOperationException ex)
 }
 
 var palette = AnsiPalette.Create(options.Colors, useTrueColor, options.CursorIntensity);
-var engine = new MatrixEngine(pool, palette, options.Density, options.Fps);
+using var engine = new MatrixEngine(pool, palette, options.Density, options.Fps);
 var frameDelayMs = 1000.0 / options.Fps;
 
 var restore = TerminalSession.Enter(keyExitEnabled);
@@ -82,7 +82,7 @@ Console.CancelKeyPress += (_, e) =>
     exitRequested = true;
 };
 
-var stdout = Console.OpenStandardOutput();
+using var stdout = Console.OpenStandardOutput();
 try
 {
     var infinite = options.DurationSeconds <= 0;
@@ -676,7 +676,7 @@ internal sealed class BrightnessPalette
     internal BrightnessPalette(Rgb head, Rgb bright, Rgb dim, Rgb bg)
     {
         _head = head;
-        BuildLut(_lut, head, bright, dim, bg);
+        BuildLut(_lut, bright, dim, bg);
     }
 
     internal ReadOnlySpan<Rgb> Lut => _lut;
@@ -684,18 +684,15 @@ internal sealed class BrightnessPalette
 
     internal Rgb Sample(byte brightnessIndex) => _lut[brightnessIndex];
 
-    private static void BuildLut(Span<Rgb> lut, Rgb head, Rgb bright, Rgb dim, Rgb bg)
+    private static void BuildLut(Span<Rgb> lut, Rgb bright, Rgb dim, Rgb bg)
     {
-        _ = head;
         var vividBright = ScaleRgb(bright, EngineConstants.LutBrightScale);
         var hotBright = HotBright(vividBright);
-        var keyframes = new (int index, Rgb rgb)[]
-        {
-            (EngineConstants.LutTailFadeEnd, dim),
-            (EngineConstants.LutDimIndex, dim),
-            (EngineConstants.LutBrightIndex, vividBright),
-            (255, hotBright),
-        };
+        Span<(int index, Rgb rgb)> keyframes = stackalloc (int, Rgb)[4];
+        keyframes[0] = (EngineConstants.LutTailFadeEnd, dim);
+        keyframes[1] = (EngineConstants.LutDimIndex, dim);
+        keyframes[2] = (EngineConstants.LutBrightIndex, vividBright);
+        keyframes[3] = (255, hotBright);
 
         for (var i = 0; i < 256; i++)
         {
@@ -716,7 +713,7 @@ internal sealed class BrightnessPalette
             (byte)Math.Min(255, bright.G + 65),
             (byte)Math.Min(255, bright.B + 25));
 
-    private static Rgb SampleKeyframes((int index, Rgb rgb)[] keyframes, int i)
+    private static Rgb SampleKeyframes(ReadOnlySpan<(int index, Rgb rgb)> keyframes, int i)
     {
         for (var s = 0; s < keyframes.Length - 1; s++)
         {
@@ -765,15 +762,15 @@ internal sealed class AnsiPalette
     private readonly byte[] _space = " "u8.ToArray();
     private readonly BrightnessPalette _palette;
     private readonly bool _trueColor;
-    private readonly double _cursorIntensity;
+    private readonly Rgb _cursorAddend;
 
-    private AnsiPalette(byte[] bgRowPrefix, byte[] rowFgReset, BrightnessPalette palette, bool trueColor, double cursorIntensity)
+    private AnsiPalette(byte[] bgRowPrefix, byte[] rowFgReset, BrightnessPalette palette, bool trueColor, Rgb cursorAddend)
     {
         _bgRowPrefix = bgRowPrefix;
         _rowFgReset = rowFgReset;
         _palette = palette;
         _trueColor = trueColor;
-        _cursorIntensity = cursorIntensity;
+        _cursorAddend = cursorAddend;
     }
 
     internal static AnsiPalette Create(ColorOptions colors, bool trueColor, double cursorIntensity)
@@ -793,7 +790,8 @@ internal sealed class AnsiPalette
             ? BuildTrueColorFgPrefix(bgRgb)
             : BuildAnsi16FgPrefix(bgNamed);
 
-        return new AnsiPalette(bgPrefix, rowFgReset, palette, trueColor, cursorIntensity);
+        var cursorAddend = BrightnessPalette.ScaleRgb(palette.HeadColor, cursorIntensity);
+        return new AnsiPalette(bgPrefix, rowFgReset, palette, trueColor, cursorAddend);
     }
 
     private static Rgb ResolveRgb(ColorValue color) => color.Rgb;
@@ -892,7 +890,6 @@ internal sealed class AnsiPalette
         AppendBytes(buffer, ref pos, _syncStart);
         AppendBytes(buffer, ref pos, _home);
         Span<byte> fgScratch = stackalloc byte[32];
-        var cursorAddend = BrightnessPalette.ScaleRgb(_palette.HeadColor, _cursorIntensity);
 
         for (var y = 0; y < height; y++)
         {
@@ -903,7 +900,6 @@ internal sealed class AnsiPalette
             AppendBytes(buffer, ref pos, _rowFgReset);
 
             var row = y * width;
-            var lastFg16 = -1;
             Rgb lastFgRgb = default;
             var hasLastFgRgb = false;
 
@@ -924,7 +920,7 @@ internal sealed class AnsiPalette
                 brightness = Math.Clamp(brightness, 0, 1);
                 var rgb = _palette.Sample((byte)(brightness * 255));
                 if (cell.CursorBoost != 0)
-                    rgb = BrightnessPalette.AddClamped(rgb, cursorAddend);
+                    rgb = BrightnessPalette.AddClamped(rgb, _cursorAddend);
 
                 if (_trueColor)
                 {
@@ -938,12 +934,13 @@ internal sealed class AnsiPalette
                 }
                 else
                 {
-                    var fgCode = Ansi16FgCode(ColorParser.NearestNamed(rgb));
-                    if (fgCode != lastFg16)
+                    if (!hasLastFgRgb || rgb.R != lastFgRgb.R || rgb.G != lastFgRgb.G || rgb.B != lastFgRgb.B)
                     {
+                        var fgCode = Ansi16FgCode(ColorParser.NearestNamed(rgb));
                         WriteAnsi16Sequence(fgScratch, fgCode, out var fgLen);
                         AppendBytes(buffer, ref pos, fgScratch[..fgLen]);
-                        lastFg16 = fgCode;
+                        lastFgRgb = rgb;
+                        hasLastFgRgb = true;
                     }
                 }
 
@@ -993,9 +990,9 @@ internal sealed class AnsiPalette
             return;
         }
 
-        Span<char> chars = stackalloc char[1];
-        chars[0] = glyph;
-        pos += Encoding.UTF8.GetBytes(chars, buffer.AsSpan(pos));
+        var rune = new Rune(glyph);
+        rune.TryEncodeToUtf8(buffer.AsSpan(pos), out var written);
+        pos += written;
     }
 }
 
@@ -1086,7 +1083,7 @@ internal sealed class GlyphPool
     private const string MovieSymbolChars = "：・．＝＋－＜＞｜゛゜";
 }
 
-internal sealed class MatrixEngine
+internal sealed class MatrixEngine : IDisposable
 {
     private readonly GlyphPool _pool;
     private readonly AnsiPalette _palette;
@@ -1319,14 +1316,14 @@ internal sealed class MatrixEngine
         }
 
         var headY = column.HeadY;
-        for (var y = 0; y < _height; y++)
-        {
-            if (y < trailTop || y > headY)
-            {
-                ClearDisplayCells(x, y);
-                continue;
-            }
+        var clearAboveEnd = Math.Min(trailTop, _height);
+        for (var y = 0; y < clearAboveEnd; y++)
+            ClearDisplayCells(x, y);
 
+        var updateStart = Math.Max(0, trailTop);
+        var updateEnd = Math.Min(headY, _height - 1);
+        for (var y = updateStart; y <= updateEnd; y++)
+        {
             var dist = headY - y;
             ref var cell = ref _grid[y * _width + x];
             if (cell.State is (byte)CellState.Empty or (byte)CellState.Continuation)
@@ -1342,6 +1339,9 @@ internal sealed class MatrixEngine
             var brightnessByte = (byte)Math.Clamp((int)(brightness * 255), 0, 255);
             SetDisplayGlyph(x, y, cell.Glyph, brightnessByte, cursorBoost);
         }
+
+        for (var y = Math.Max(headY + 1, 0); y < _height; y++)
+            ClearDisplayCells(x, y);
     }
 
     /// <summary>1 at Head, 0 at trail tip. Gamma &lt; 1 keeps mid-trail brighter while the tip still fades out.</summary>
@@ -1433,6 +1433,27 @@ internal sealed class MatrixEngine
     {
         for (var y = 0; y < _height; y++)
             ClearDisplayCells(x, y);
+    }
+
+    public void Dispose()
+    {
+        if (_grid.Length > 0)
+        {
+            ArrayPool<Cell>.Shared.Return(_grid);
+            _grid = [];
+        }
+
+        if (_columns.Length > 0)
+        {
+            ArrayPool<ColumnState>.Shared.Return(_columns);
+            _columns = [];
+        }
+
+        if (_renderBuffer.Length > 0)
+        {
+            ArrayPool<byte>.Shared.Return(_renderBuffer);
+            _renderBuffer = [];
+        }
     }
 }
 
@@ -1637,6 +1658,7 @@ Usage:
   matrix [duration]
   matrix --duration <seconds>
   matrix --char <character>
+  matrix --mode ascii
   matrix --mode movie
   matrix --density <0.0-1.0>
   matrix --fps <1-60>
@@ -1647,9 +1669,11 @@ Usage:
 
 Duration:
   Default 5 seconds. Use 0 or a negative value to run until a key is pressed.
+  For negative values, use --duration (e.g. matrix --duration -1).
 
 Modes:
   (default)   ascii-matrix character pool
+  --mode ascii  same as default
   --char X    single-character mode
   --mode movie  full-width katakana-heavy pool with digits, kanji, symbols (UTF-8 required)
 
