@@ -2,7 +2,7 @@
 //
 // Setup (all required):
 //   1. settings.json profile:
-//        "experimental.pixelShaderPath": "D:\\github\\guitarrapc\\matrix\\shaders\\windows-terminal\\matrix-bloom.hlsl"
+//        "experimental.pixelShaderPath": "...\\matrix-bloom.hlsl"
 //   2. Open a NEW tab after saving settings.
 //   3. Enable the shader: Command Palette (Ctrl+Shift+P) → "Toggle shader effects"
 //      (pixel shaders are OFF by default even when a path is set).
