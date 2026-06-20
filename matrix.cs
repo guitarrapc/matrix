@@ -1060,7 +1060,7 @@ internal sealed class AnsiPalette
 
     private static byte[] BuildAnsi16BgPrefix(ConsoleColor16 color)
     {
-        var code = color <= ConsoleColor16.White ? 40 + (int)color : 100 + ((int)color - 8);
+        var code = Ansi16BgCode(color);
         return BuildAnsi16Sequence(code);
     }
 
@@ -1192,7 +1192,25 @@ internal sealed class AnsiPalette
     }
 
     private static int Ansi16FgCode(ConsoleColor16 color) =>
-        color <= ConsoleColor16.White ? 30 + (int)color : 90 + ((int)color - 8);
+        Ansi16IsBright(color) ? 90 + Ansi16BaseIndex(color) : 30 + Ansi16BaseIndex(color);
+
+    private static int Ansi16BgCode(ConsoleColor16 color) =>
+        Ansi16IsBright(color) ? 100 + Ansi16BaseIndex(color) : 40 + Ansi16BaseIndex(color);
+
+    private static bool Ansi16IsBright(ConsoleColor16 color) => color >= ConsoleColor16.DarkGray;
+
+    private static int Ansi16BaseIndex(ConsoleColor16 color) => color switch
+    {
+        ConsoleColor16.Black or ConsoleColor16.DarkGray => 0,
+        ConsoleColor16.DarkRed or ConsoleColor16.Red => 1,
+        ConsoleColor16.DarkGreen or ConsoleColor16.Green => 2,
+        ConsoleColor16.DarkYellow or ConsoleColor16.Yellow => 3,
+        ConsoleColor16.DarkBlue or ConsoleColor16.Blue => 4,
+        ConsoleColor16.DarkMagenta or ConsoleColor16.Magenta => 5,
+        ConsoleColor16.DarkCyan or ConsoleColor16.Cyan => 6,
+        ConsoleColor16.Gray or ConsoleColor16.White => 7,
+        _ => 7,
+    };
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private BrightnessPalette SelectPalette(int x, int width, out int band)
