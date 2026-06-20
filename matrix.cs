@@ -164,6 +164,8 @@ internal static class EngineConstants
     internal const int DensityRecoveryFrames = 3;
     /// <summary>Baseline spawn multiplier at/above target — compensates lifetime model error and ongoing deaths.</summary>
     internal const double DensitySpawnHeadroom = 1.45;
+    /// <summary>Max trail-length scale when active columns are far below the density target (e.g. 0.35 → up to 35% longer).</summary>
+    internal const double TrailLengthDeficitMaxBoost = 0.35;
     internal const double TrailMinHeightFraction = 0.30;
     internal const double TrailMaxHeightFraction = 0.90;
     internal const int MinTrailCells = 10;
@@ -993,6 +995,7 @@ internal sealed class MatrixEngine
     private int _activeChancePercent;
     private int _baseSpawnChancePercent;
     private int _spawnChancePercent;
+    private double _trailLengthBoost = 1.0;
     private readonly Random _rng = new();
 
     private Cell[] _grid = [];
@@ -1024,7 +1027,7 @@ internal sealed class MatrixEngine
         _spawnChancePercent = _baseSpawnChancePercent;
     }
 
-    /// <summary>Raise spawn when active streams fall below the density target (variable lifetimes cause drift).</summary>
+    /// <summary>Adjust spawn rate and new-stream trail length from active-column shortfall vs density target.</summary>
     private void RefreshAdaptiveSpawnChance()
     {
         var streamCount = 0;
@@ -1041,8 +1044,14 @@ internal sealed class MatrixEngine
         if (streamCount == 0 || _activeChancePercent <= 0)
         {
             _spawnChancePercent = 0;
+            _trailLengthBoost = 1.0;
             return;
         }
+
+        var targetFraction = _activeChancePercent / 100.0;
+        var currentFraction = activeCount / (double)streamCount;
+        var shortfall = Math.Max(0, targetFraction - currentFraction);
+        _trailLengthBoost = 1.0 + shortfall / Math.Max(0.01, targetFraction) * EngineConstants.TrailLengthDeficitMaxBoost;
 
         if (_activeChancePercent >= 100)
         {
@@ -1050,7 +1059,7 @@ internal sealed class MatrixEngine
             return;
         }
 
-        var targetActive = (int)Math.Ceiling(_activeChancePercent / 100.0 * streamCount);
+        var targetActive = (int)Math.Ceiling(targetFraction * streamCount);
         var deficit = targetActive - activeCount;
         var headroomSpawn = Math.Min(100, (int)Math.Round(_baseSpawnChancePercent * EngineConstants.DensitySpawnHeadroom));
 
@@ -1274,8 +1283,12 @@ internal sealed class MatrixEngine
 
     private void ActivateColumn(int x)
     {
-        var minTrail = Math.Max(EngineConstants.MinTrailCells, (int)(_height * EngineConstants.TrailMinHeightFraction));
-        var maxTrail = Math.Max(minTrail, (int)(_height * EngineConstants.TrailMaxHeightFraction));
+        var minTrail = (int)Math.Round(
+            Math.Max(EngineConstants.MinTrailCells, _height * EngineConstants.TrailMinHeightFraction) * _trailLengthBoost);
+        var maxTrail = (int)Math.Round(
+            Math.Max(minTrail, _height * EngineConstants.TrailMaxHeightFraction) * _trailLengthBoost);
+        maxTrail = Math.Min(_height, maxTrail);
+        minTrail = Math.Min(minTrail, maxTrail);
         var speed = (byte)_rng.Next(EngineConstants.MinSpeed, EngineConstants.MaxSpeed + 1);
 
         _columns[x] = new ColumnState

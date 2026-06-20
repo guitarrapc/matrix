@@ -65,6 +65,7 @@ True Color terminals use 24-bit ANSI; others fall back to the nearest 16-color n
 | Movie density | effective density × **1.5** (cap 1.0) |
 | Initial active columns | effective density × **90%** at start / resize (`density 1.0` → **90%** of stream columns) |
 | Spawn (inactive columns) | **Adaptive** — baseline × headroom at target; **raised** when active streams fall below target (~0.2s catch-up) |
+| New stream trail length | **Adaptive** — up to **+35%** when active columns are below target (offsets short / faded-looking trails) |
 
 ---
 
@@ -171,7 +172,7 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 - **Decision:** even anchor columns, full-width glyphs only, Continuation cell for the second display cell.
 - **Pitfall:** emitting a **space** on Continuation cells caused cursor drift and crooked lines — Continuation must write **zero bytes**.
 - **Glyph mix:** katakana-only was too plain vs the film. Expanded to full-width digits, five kanji (`日三二一十`), and symbols — still **80% katakana** so the mix reads as “occasional” not “character soup.” Half-width katakana was rejected (would forfeit the two-cell grid or reintroduce width mixing). Standalone `゛` `゜` are not guaranteed two cells in Unicode; kept as a trial.
-- **Spawn rate vs density:** fixed per-frame spawn could not match variable stream lifetimes (random trail length, speed, staggered deaths). Baseline spawn uses a height-based estimate with **headroom** at target; each frame, if active streams are **below** `density × 90%`, spawn **increases** to close the gap within ~0.2s.
+- **Spawn rate vs density:** fixed per-frame spawn could not match variable stream lifetimes (random trail length, speed, staggered deaths). Baseline spawn uses a height-based estimate with **headroom** at target; each frame, if active streams are **below** `density × 90%`, spawn **increases** to close the gap within ~0.2s. New streams also spawn with **longer trails** when shortfall is high — column count alone does not fix “thin” visuals when each trail is short or faded at the top.
 
 ### Color model evolution
 
