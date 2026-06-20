@@ -183,12 +183,12 @@ internal static class EngineConstants
     internal const double DefaultCursorIntensity = 2.5;
     /// <summary>Head additive bloom when the terminal applies a GPU bloom shader.</summary>
     internal const double ShaderBloomCursorIntensity = 1.0;
-    internal const int LutTailFadeEnd = 38;
+    internal const int LutTailFadeEnd = 22;
     internal const int LutDimIndex = 64;
     internal const int LutBrightIndex = 191;
     internal const double LutBrightScale = 1.18;
     /// <summary>&lt; 1 lifts mid-trail vs tip; tip still reaches 0.</summary>
-    internal const double TrailEnvelopeGamma = 0.78;
+    internal const double TrailEnvelopeGamma = 0.58;
     /// <summary>Cap simultaneous stream births so cohorts do not die in sync (~2–3s).</summary>
     internal const int MaxSpawnsPerFrame = 4;
     /// <summary>Consecutive ticks with the same size before applying a terminal resize.</summary>
