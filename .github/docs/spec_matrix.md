@@ -16,9 +16,25 @@ Distribution targets **standalone executables per platform** via **Native AOT** 
 
 ### Column rain model
 
-The animation uses **vertical columns** of falling characters. Each column maintains an independent stream with its own speed, trail length, and activity state.
+The animation uses **vertical columns** of falling characters. Each column maintains an independent **stream** with its own speed, trail length, and activity state.
 
 This model was chosen because it matches the film aesthetic, allows sparse black regions between columns, and keeps resource use bounded by updating per column rather than randomizing the entire screen each frame.
+
+### Vertical stream motion
+
+In the *Matrix* film, glyphs in an active column appear to fall **straight downward along a single vertical line** (fixed column **X**). The user should perceive a **contiguous vertical ribbon** moving down, not scattered characters flickering in place within the column.
+
+Normative behavior:
+
+| Requirement | Meaning |
+|---|---|
+| **Fixed column X** | Every glyph in a stream occupies the same terminal column. |
+| **Downward motion** | The stream moves **down as a unit** each frame, at that column’s speed (1–3 cells per frame). |
+| **Vertical contiguity** | While a stream is active on screen, its visible trail is a **single contiguous vertical segment** — no random empty holes inside the segment. |
+| **Leading edge** | The **Head** is at the **bottom** of the segment (the front of the fall); older glyphs sit **above** it. |
+| **Black space** | Most empty (black) area comes from **inactive columns** and **gaps between streams**, not from punching random holes through an active stream. |
+
+Glyph **mutation** (changing a cell to another character from the pool) may still occur while the stream falls; only **position** must stay vertically aligned.
 
 ### Cell display states
 
@@ -26,12 +42,20 @@ Each terminal cell is in exactly one of four states:
 
 | State | Appearance | Role |
 |---|---|---|
-| **Empty** | Background only, no visible glyph | Inactive space; contributes to the sparse look |
-| **Dim** | Dark green (configurable) | Older trail characters |
-| **Bright** | Highlight green (configurable) | Mid-trail characters |
-| **Head** | White (configurable) | Leading edge of each active drop |
+| **Empty** | Background only, no visible glyph | Inactive column, or stream not present at this row |
+| **Dim** | Dark green (configurable) | Upper trail (farther above the Head) |
+| **Bright** | Highlight green (configurable) | Lower trail (near the Head) |
+| **Head** | White (configurable) | Leading edge at the bottom of the active segment |
 
-On each frame, cells in a column advance through **Head → Bright → Dim → Empty**. Transitions from **Dim → Empty** are **probabilistic**, producing irregular, partially hollow trails rather than a smooth solid gradient. This is an intentional CLI approximation of the film: the movie uses continuous shading and mostly inactive space *between* columns; this model also allows black gaps *within* trails for a slightly grittier look.
+Within an active stream, state is determined by **distance from the Head** (fixed bands), not by per-cell random fading:
+
+| Transition | Rule |
+|---|---|
+| **Head → Bright** | When the stream shifts down, the cell that was Head becomes Bright. |
+| **Bright → Dim** | By distance above the Head (older segment of the trail). |
+| **Dim → Empty** | When the cell **leaves** the stream (scrolls off the top of the screen or the stream ends) — **not** by random erasure while still inside the trail. |
+
+This matches the film: the trail is a **continuous vertical gradient** behind the Head; irregularity comes from **between-column sparsity** and **glyph mutation**, not from breaking the column into disjoint lit cells.
 
 ### Frame rate and terminal presentation
 
@@ -50,11 +74,11 @@ These values are fixed in v1; they define the default look and resource profile:
 | Target FPS | 18 |
 | Active columns | ~35% of columns at a time |
 | Trail length | 8–24 characters per column (random per column) |
-| Fall speed | 1–3 cells per frame (random per column) |
-| Head → Bright | Always |
-| Bright → Dim | ~70% chance per frame |
-| Dim → Empty | ~75% chance per frame |
-| Glyph mutation | ~8% chance per frame per cell |
+| Fall speed | 1–3 cells per frame (random per column); entire stream shifts by this amount |
+| Head → Bright | Always on shift (former Head cell) |
+| Bright vs Dim | By distance band within trail (not random per frame) |
+| Dim → Empty | Only when cell exits stream or column deactivates (not random mid-trail) |
+| Glyph mutation | ~8% chance per frame per visible cell in stream |
 | New column spawn | ~3% chance per frame among inactive columns |
 
 ---
@@ -259,7 +283,7 @@ Archives use `.tar.gz` on Unix-like platforms and `.zip` on Windows.
 
 | Decision | Why |
 |---|---|
-| Column rain with 4 states + probabilistic fade | Film-like look while staying lightweight on resources |
+| Vertical stream shift + distance-based 4 states | Film-like straight-line fall; black mostly between columns |
 | ascii-matrix default; movie mode optional | Broad terminal compatibility by default; authentic script when UTF-8 is available |
 | True Color hex + named colors + 16-color fallback | Rich defaults on modern terminals; graceful degradation elsewhere |
 | Alternate screen + restore | Preserves shell scrollback and prompt UX |
@@ -277,3 +301,4 @@ Archives use `.tar.gz` on Unix-like platforms and `.zip` on Windows.
 - **Unix `termios` is not portable as a single blittable struct:** Linux (32-byte `c_cc`, 32-bit flags) and macOS (20-byte `c_cc`, 64-bit flags) need separate layouts and `VMIN`/`VTIME` indices.
 - **True Color detection stays conservative:** `TERM=xterm-256color` alone must not enable 24-bit output; environment signals (`COLORTERM`, `WT_SESSION`, etc.) remain the gate.
 - **Hot-path rendering:** pre-built ANSI byte sequences, `ArrayPool` grids/buffers, and a single `Stream.Write` + `Flush` per frame keep allocations out of the animation loop; palette and glyph pools are initialized once at startup.
+- **Vertical motion must be explicit in the spec:** the film reads as straight-line falls because each stream moves down as one contiguous segment. An early design treated **Dim → Empty** as high per-frame probability anywhere in the column; that produced scattered, flickering cells and did **not** look like Matrix rain. **Black belongs mostly between columns**, not inside active trails. The visual spec was revised; animation now **shifts each column down as a unit** and assigns Bright/Dim by distance from the Head.

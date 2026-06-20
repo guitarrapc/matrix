@@ -153,13 +153,12 @@ internal static class EngineConstants
     internal const int FrameDelayMs = 1000 / TargetFps;
     internal const int SpawnChancePercent = 3;
     internal const int InitialActivePercent = 35;
-    internal const int BrightToDimChance = 70;
-    internal const int DimToEmptyChance = 75;
     internal const int GlyphMutationChance = 8;
     internal const int MinTrailLength = 8;
     internal const int MaxTrailLength = 24;
     internal const int MinSpeed = 1;
     internal const int MaxSpeed = 3;
+    internal const int BrightDistance = 2;
 }
 
 internal readonly struct Rgb(byte r, byte g, byte b)
@@ -864,41 +863,62 @@ internal sealed class MatrixEngine
             return;
         }
 
-        column.HeadY += column.Speed;
-        if (column.HeadY - column.TrailLength > _height)
+        var speed = column.Speed;
+        ShiftColumnDown(x, speed);
+        column.HeadY += speed;
+
+        var trailTop = column.HeadY - column.TrailLength + 1;
+        if (trailTop > _height - 1)
         {
             ClearColumn(x);
             column.Active = false;
             return;
         }
 
+        var headY = column.HeadY;
         for (var y = 0; y < _height; y++)
         {
             ref var cell = ref _grid[y * _width + x];
-            var dist = column.HeadY - y;
-            if (dist < 0 || dist > column.TrailLength)
+            if (y < trailTop || y > headY)
             {
-                FadeCell(ref cell);
+                cell.State = (byte)CellState.Empty;
+                cell.Glyph = '\0';
                 continue;
             }
 
-            if (dist == 0)
-            {
-                cell.State = (byte)CellState.Head;
-                cell.Glyph = _pool.Pick(_rng);
-                continue;
-            }
-
-            if (cell.State == (byte)CellState.Head)
-                cell.State = (byte)CellState.Bright;
-            else
-                TransitionCell(ref cell);
-
+            var dist = headY - y;
             if (cell.State == (byte)CellState.Empty)
-                cell.State = dist <= 2 ? (byte)CellState.Bright : (byte)CellState.Dim;
-
-            if (cell.State != (byte)CellState.Empty && _rng.Next(100) < EngineConstants.GlyphMutationChance)
                 cell.Glyph = _pool.Pick(_rng);
+
+            cell.State = dist == 0
+                ? (byte)CellState.Head
+                : dist <= EngineConstants.BrightDistance
+                    ? (byte)CellState.Bright
+                    : (byte)CellState.Dim;
+
+            if (_rng.Next(100) < EngineConstants.GlyphMutationChance)
+                cell.Glyph = _pool.Pick(_rng);
+        }
+    }
+
+    private void ShiftColumnDown(int x, int speed)
+    {
+        if (speed <= 0)
+            return;
+
+        var limit = Math.Min(speed, _height);
+        for (var y = _height - 1; y >= limit; y--)
+        {
+            ref var dest = ref _grid[y * _width + x];
+            ref var src = ref _grid[(y - limit) * _width + x];
+            dest = src;
+        }
+
+        for (var y = 0; y < limit; y++)
+        {
+            ref var cell = ref _grid[y * _width + x];
+            cell.State = (byte)CellState.Empty;
+            cell.Glyph = '\0';
         }
     }
 
@@ -920,37 +940,6 @@ internal sealed class MatrixEngine
             ref var cell = ref _grid[y * _width + x];
             cell.State = (byte)CellState.Empty;
             cell.Glyph = '\0';
-        }
-    }
-
-    private void FadeCell(ref Cell cell)
-    {
-        switch (cell.State)
-        {
-            case (byte)CellState.Head:
-                cell.State = (byte)CellState.Bright;
-                break;
-            case (byte)CellState.Bright when _rng.Next(100) < EngineConstants.BrightToDimChance:
-                cell.State = (byte)CellState.Dim;
-                break;
-            case (byte)CellState.Dim when _rng.Next(100) < EngineConstants.DimToEmptyChance:
-                cell.State = (byte)CellState.Empty;
-                cell.Glyph = '\0';
-                break;
-        }
-    }
-
-    private void TransitionCell(ref Cell cell)
-    {
-        switch (cell.State)
-        {
-            case (byte)CellState.Bright when _rng.Next(100) < EngineConstants.BrightToDimChance:
-                cell.State = (byte)CellState.Dim;
-                break;
-            case (byte)CellState.Dim when _rng.Next(100) < EngineConstants.DimToEmptyChance:
-                cell.State = (byte)CellState.Empty;
-                cell.Glyph = '\0';
-                break;
         }
     }
 }
