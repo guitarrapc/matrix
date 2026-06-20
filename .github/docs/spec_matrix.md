@@ -43,7 +43,7 @@ Color is driven by the Matrix rain wave **and** a trail envelope:
 - **Wave** — per-column pulse and raindrop truncation (reference `getRainBrightness`).
 - **Trail envelope** — fade from Head (**1.0**) to trail tip (**0.0**); gamma **0.78** lifts mid-trail brightness while the tip still reaches black. Final brightness = wave × envelope.
 - **Palette:** four CLI colors define a brightness→color map. LUT high end is boosted (`--bright` × 1.18, hotter peak); **`--head` is applied only on the stream Head** (white bloom), not across high wave brightness.
-- **Cursor highlight:** the Head cell only (`dist == 0`); not raindrop wave edges.
+- **Cursor highlight:** the Head cell only (`dist == 0`); `--head` added at `--cursor-intensity` (default **2.5**).
 - **Dither** on brightness before palette lookup.
 
 True Color terminals use 24-bit ANSI; others fall back to the nearest 16-color name with a stderr warning.
@@ -103,6 +103,7 @@ matrix --char <character>
 matrix --mode movie
 matrix --density <0.0-1.0>
 matrix --bg <color> --head <color> --bright <color> --dim <color>
+matrix --cursor-intensity <0.5-5.0>
 matrix --help
 matrix --version
 ```
@@ -127,6 +128,7 @@ User-facing messages are **English only** in v1.
 | `--head` | `#FFFFFF` |
 | `--bright` | `#30FF58` |
 | `--dim` | `#00AA1C` |
+| `--cursor-intensity` | **2.5** (Head-cell additive bloom using `--head`) |
 
 Invalid colors are fatal. True Color is inferred from environment signals (`COLORTERM`, `WT_SESSION`, `TERM_PROGRAM`, etc.); `TERM=xterm-256color` alone does **not** enable 24-bit. Windows enables virtual terminal processing at startup.
 

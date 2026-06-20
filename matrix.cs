@@ -69,7 +69,7 @@ catch (InvalidOperationException ex)
     return;
 }
 
-var palette = AnsiPalette.Create(options.Colors, useTrueColor);
+var palette = AnsiPalette.Create(options.Colors, useTrueColor, options.CursorIntensity);
 var engine = new MatrixEngine(pool, palette, options.Density);
 
 var restore = TerminalSession.Enter(keyExitEnabled);
@@ -172,7 +172,7 @@ internal static class EngineConstants
     internal const double RainFallSpeed = 0.3;
     internal const double RaindropLength = 0.75;
     internal const double DitherMagnitude = 0.05;
-    internal const double CursorIntensity = 2.0;
+    internal const double DefaultCursorIntensity = 2.5;
     internal const int LutTailFadeEnd = 38;
     internal const int LutDimIndex = 64;
     internal const int LutBrightIndex = 191;
@@ -239,6 +239,7 @@ internal sealed class CliOptions
     internal string? ErrorMessage { get; private init; }
     internal ColorOptions Colors { get; private init; } = ColorOptions.Default;
     internal double Density { get; private init; } = EngineConstants.DefaultDensity;
+    internal double CursorIntensity { get; private init; } = EngineConstants.DefaultCursorIntensity;
 
     internal static CliOptions Parse(string[] args)
     {
@@ -252,6 +253,7 @@ internal sealed class CliOptions
         var hasDurationFlag = false;
         var hasPositionalDuration = false;
         ColorValue? bg = null, head = null, bright = null, dim = null;
+        var cursorIntensity = EngineConstants.DefaultCursorIntensity;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -322,6 +324,12 @@ internal sealed class CliOptions
                         return Error("invalid --density value (expected 0.0 to 1.0)");
                     hasDensityFlag = true;
                     break;
+                case "--cursor-intensity":
+                    if (++i >= args.Length)
+                        return Error("missing value for --cursor-intensity");
+                    if (!TryParseCursorIntensity(args[i], out cursorIntensity))
+                        return Error("invalid --cursor-intensity value (expected 0.5 to 5.0)");
+                    break;
                 default:
                     if (arg.StartsWith('-'))
                         return Error($"unknown option: {arg}");
@@ -352,6 +360,7 @@ internal sealed class CliOptions
             SingleChar = singleChar,
             DurationSeconds = duration,
             Density = density,
+            CursorIntensity = cursorIntensity,
             Colors = new ColorOptions(
                 bg ?? ColorOptions.DefaultBackground,
                 head ?? ColorOptions.DefaultHead,
@@ -374,6 +383,14 @@ internal sealed class CliOptions
         if (!double.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out density))
             return false;
         return density is >= 0 and <= 1;
+    }
+
+    private static bool TryParseCursorIntensity(ReadOnlySpan<char> text, out double intensity)
+    {
+        intensity = 0;
+        if (!double.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out intensity))
+            return false;
+        return intensity is >= 0.5 and <= 5.0;
     }
 }
 
@@ -720,15 +737,17 @@ internal sealed class AnsiPalette
     private readonly byte[] _newline = "\n"u8.ToArray();
     private readonly BrightnessPalette _palette;
     private readonly bool _trueColor;
+    private readonly double _cursorIntensity;
 
-    private AnsiPalette(byte[] bgRowPrefix, BrightnessPalette palette, bool trueColor)
+    private AnsiPalette(byte[] bgRowPrefix, BrightnessPalette palette, bool trueColor, double cursorIntensity)
     {
         _bgRowPrefix = bgRowPrefix;
         _palette = palette;
         _trueColor = trueColor;
+        _cursorIntensity = cursorIntensity;
     }
 
-    internal static AnsiPalette Create(ColorOptions colors, bool trueColor)
+    internal static AnsiPalette Create(ColorOptions colors, bool trueColor, double cursorIntensity)
     {
         var palette = new BrightnessPalette(
             ResolveRgb(colors.Head),
@@ -740,7 +759,7 @@ internal sealed class AnsiPalette
             ? BuildTrueColorBgPrefix(ResolveRgb(colors.Background))
             : BuildAnsi16BgPrefix(ResolveNamed(colors.Background));
 
-        return new AnsiPalette(bgPrefix, palette, trueColor);
+        return new AnsiPalette(bgPrefix, palette, trueColor, cursorIntensity);
     }
 
     private static Rgb ResolveRgb(ColorValue color) => color.Rgb;
@@ -830,7 +849,7 @@ internal sealed class AnsiPalette
         var pos = 0;
         AppendBytes(buffer, ref pos, _home);
         Span<byte> fgScratch = stackalloc byte[32];
-        var cursorAddend = BrightnessPalette.ScaleRgb(_palette.HeadColor, EngineConstants.CursorIntensity);
+        var cursorAddend = BrightnessPalette.ScaleRgb(_palette.HeadColor, _cursorIntensity);
 
         for (var y = 0; y < height; y++)
         {
@@ -1518,6 +1537,7 @@ Usage:
   matrix --mode movie
   matrix --density <0.0-1.0>
   matrix --bg <color> --head <color> --bright <color> --dim <color>
+  matrix --cursor-intensity <0.5-5.0>
   matrix --help
   matrix --version
 
@@ -1537,6 +1557,7 @@ Density:
 Colors:
   Hex (#RGB or #RRGGBB) or 16-color names (black, green, darkgreen, ...).
   Defaults: --bg #000000 --head #FFFFFF --bright #30FF58 --dim #00AA1C
+  --cursor-intensity  Head-cell bloom strength (additive --head). Default 2.5.
 
 Examples:
   matrix
