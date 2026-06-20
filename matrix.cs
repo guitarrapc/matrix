@@ -633,12 +633,14 @@ internal sealed class BrightnessPalette
 
     private static void BuildLut(Span<Rgb> lut, Rgb head, Rgb bright, Rgb dim, Rgb bg)
     {
+        _ = head;
+        var hotBright = HotBright(bright);
         var keyframes = new (int index, Rgb rgb)[]
         {
             (EngineConstants.LutTailFadeEnd, dim),
             (EngineConstants.LutDimIndex, dim),
             (EngineConstants.LutBrightIndex, bright),
-            (255, head),
+            (255, hotBright),
         };
 
         for (var i = 0; i < 256; i++)
@@ -650,11 +652,17 @@ internal sealed class BrightnessPalette
                 continue;
             }
 
-            lut[i] = SampleKeyframesHsl(keyframes, i);
+            lut[i] = SampleKeyframes(keyframes, i);
         }
     }
 
-    private static Rgb SampleKeyframesHsl((int index, Rgb rgb)[] keyframes, int i)
+    private static Rgb HotBright(Rgb bright) =>
+        new(
+            (byte)Math.Min(255, bright.R + 30),
+            (byte)Math.Min(255, bright.G + 40),
+            (byte)Math.Min(255, bright.B + 15));
+
+    private static Rgb SampleKeyframes((int index, Rgb rgb)[] keyframes, int i)
     {
         for (var s = 0; s < keyframes.Length - 1; s++)
         {
@@ -662,7 +670,7 @@ internal sealed class BrightnessPalette
             {
                 var span = keyframes[s + 1].index - keyframes[s].index;
                 var t = span > 0 ? (i - keyframes[s].index) / (double)span : 0;
-                return LerpHsl(keyframes[s].rgb, keyframes[s + 1].rgb, t);
+                return LerpHuePreserve(keyframes[s].rgb, keyframes[s + 1].rgb, t);
             }
         }
 
@@ -677,82 +685,6 @@ internal sealed class BrightnessPalette
             (byte)(from.R + (to.R - from.R) * t),
             (byte)(from.G + (to.G - from.G) * t),
             (byte)(from.B + (to.B - from.B) * t));
-    }
-
-    private static Rgb LerpHsl(Rgb from, Rgb to, double t)
-    {
-        t = Math.Clamp(t, 0, 1);
-        var (h1, s1, l1) = RgbToHsl(from);
-        var (h2, s2, l2) = RgbToHsl(to);
-
-        var dh = h2 - h1;
-        if (dh > 0.5)
-            h1 += 1.0;
-        else if (dh < -0.5)
-            h2 += 1.0;
-
-        var h = (h1 + (h2 - h1) * t) % 1.0;
-        var s = s1 + (s2 - s1) * t;
-        var l = l1 + (l2 - l1) * t;
-        return HslToRgb(h, s, l);
-    }
-
-    private static (double h, double s, double l) RgbToHsl(Rgb c)
-    {
-        var r = c.R / 255.0;
-        var g = c.G / 255.0;
-        var b = c.B / 255.0;
-        var max = Math.Max(r, Math.Max(g, b));
-        var min = Math.Min(r, Math.Min(g, b));
-        var l = (max + min) / 2.0;
-
-        if (Math.Abs(max - min) < 1e-9)
-            return (0, 0, l);
-
-        var d = max - min;
-        var s = l > 0.5 ? d / (2.0 - max - min) : d / (max + min);
-        double h;
-        if (Math.Abs(max - r) < 1e-9)
-            h = (g - b) / d + (g < b ? 6.0 : 0.0);
-        else if (Math.Abs(max - g) < 1e-9)
-            h = (b - r) / d + 2.0;
-        else
-            h = (r - g) / d + 4.0;
-        h /= 6.0;
-        return (h, s, l);
-    }
-
-    private static Rgb HslToRgb(double h, double s, double l)
-    {
-        if (s <= 1e-9)
-        {
-            var gray = (byte)Math.Round(l * 255);
-            return new Rgb(gray, gray, gray);
-        }
-
-        h = (h % 1.0 + 1.0) % 1.0;
-        var q = l < 0.5 ? l * (1.0 + s) : l + s - l * s;
-        var p = 2.0 * l - q;
-
-        static double HueToRgb(double p, double q, double t)
-        {
-            if (t < 0)
-                t += 1;
-            if (t > 1)
-                t -= 1;
-            if (t < 1.0 / 6.0)
-                return p + (q - p) * 6.0 * t;
-            if (t < 0.5)
-                return q;
-            if (t < 2.0 / 3.0)
-                return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
-            return p;
-        }
-
-        return new Rgb(
-            (byte)Math.Round(HueToRgb(p, q, h + 1.0 / 3.0) * 255),
-            (byte)Math.Round(HueToRgb(p, q, h) * 255),
-            (byte)Math.Round(HueToRgb(p, q, h - 1.0 / 3.0) * 255));
     }
 
     internal static Rgb AddClamped(Rgb baseColor, Rgb addend) =>
@@ -1188,10 +1120,7 @@ internal sealed class MatrixEngine
                 cell.Glyph = _pool.Pick(_rng);
 
             var brightness = RainBrightness.Compute(y, _height, _simTime, column);
-            var brightnessBelow = y + 1 < _height
-                ? RainBrightness.Compute(y + 1, _height, _simTime, column)
-                : 0f;
-            var cursorBoost = (byte)(dist == 0 || brightness > brightnessBelow ? 1 : 0);
+            var cursorBoost = (byte)(dist == 0 ? 1 : 0);
             var brightnessByte = (byte)Math.Clamp((int)(brightness * 255), 0, 255);
             SetDisplayGlyph(x, y, cell.Glyph, brightnessByte, cursorBoost);
         }

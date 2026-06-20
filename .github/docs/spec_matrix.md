@@ -41,8 +41,8 @@ Wide glyphs use an **anchor** cell plus a **Continuation** cell to the right. Co
 Color is driven by the Matrix rain (GLSL + palette pass), not by simple distance-from-head shading:
 
 - **Brightness** comes from a per-column **wave** (shared pulse, raindrop truncation). It is **not** trail position.
-- **Palette:** four CLI colors (`--bg`, `--dim`, `--bright`, `--head`) define a global brightness→color map.
-- **Cursor highlight:** the Head and the leading edge of a bright raindrop are emphasized (cursor channel).
+- **Palette:** four CLI colors (`--bg`, `--dim`, `--bright`, `--head`) define a brightness→color map. The LUT tops out at vivid green (`--bright`); **`--head` is applied only on the stream Head** (white bloom), not across high wave brightness.
+- **Cursor highlight:** the Head cell only (`dist == 0`); not raindrop wave edges.
 - **Dither** on brightness before palette lookup.
 
 True Color terminals use 24-bit ANSI; others fall back to the nearest 16-color name with a stderr warning.
@@ -185,7 +185,7 @@ These are behavioral constraints, easy to get wrong in a top-origin terminal:
 
 1. **`raindropLength` is a small scale factor (~0.75), not trail cell count.** Using trail length as the divisor flattened brightness across each column → everything mapped to the brightest LUT entries.
 2. **Terminal row 0 is the top; glyph Y is 0 at the bottom.** Without flipping Y, the wave inverts, cursor detection (`brightness` vs cell below) fires on most cells, and additive white head boost washes the screen to pure white.
-3. **Cursor boost is additive and strong.** It must stay sparse (Head + raindrop leading edge only). Broad cursor flags + white `--head` silently negate the green palette.
+3. **Cursor boost is additive and strong.** It must apply **only to the Head** (`dist == 0`). Mapping `--head` into the LUT or boosting raindrop edges washed the trail white. **LUT interpolation through HSL toward white** also produced yellow bands between white and green — keep the LUT on the green ramp; white comes from `--head` on the Head cell only.
 
 ### Runtime and build
 
