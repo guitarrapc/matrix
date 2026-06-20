@@ -7,8 +7,7 @@
   ],
   "profiles": {
     "defaults": {
-      "startingDirectory": null,
-      "experimental.pixelShaderPath": "matrix-bloom.hlsl"
+      "experimental.pixelShaderPath": "matrix-ripple.hlsl"
     }
   }
 }
