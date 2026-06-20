@@ -26,10 +26,10 @@ cbuffer PixelShaderSettings {
 static const float RippleInterval = 6.2;
 static const float RippleActiveSeconds = 5.0;
 static const float RippleSpeed = 0.24;
-static const float RippleFrequency = 44.0;
-static const float RippleWidth = 0.18;
-static const float RippleDistortion = 0.010;
-static const float RippleBrightness = 0.62;
+static const float RippleFrequency = 40.0;
+static const float RippleWidth = 0.34;
+static const float RippleDistortion = 0.001;
+static const float RippleBrightness = 0.18;
 static const float2 RippleOriginMin = float2(0.18, 0.18);
 static const float2 RippleOriginMax = float2(0.82, 0.72);
 static const float3 LumWeights = float3(0.299, 0.587, 0.114);
@@ -47,8 +47,7 @@ float Luminance(float3 rgb)
 
 struct RippleResult
 {
-    float2 Uv;
-    float Brightness;
+    float Intensity;
 };
 
 float Hash(float seed)
@@ -75,28 +74,26 @@ RippleResult RippledUv(float2 tex)
     delta.x *= aspect;
     float dist = length(delta);
     float t = dist - elapsed * RippleSpeed;
-    float safeT = max(abs(t), 0.028);
+    float safeT = max(abs(t), 0.055);
     float wave = sin(t * RippleFrequency) / safeT;
     float envelope = exp(-pow(t / RippleWidth, 2.0));
     float grow = smoothstep(0.0, 0.08, progress);
     float fade = 1.0 - smoothstep(0.78, 1.0, progress);
-    float ripple = wave * envelope * grow * fade * active;
-    float brightness = saturate(ripple * 0.11);
-    float2 dir = normalize(delta + float2(0.0001, 0.0001));
-    dir.x /= aspect;
+    float ripple = wave * envelope * grow * fade * active * 0.20;
 
     RippleResult result;
-    result.Uv = clamp(tex + dir * ripple * RippleDistortion, 0.0, 1.0);
-    result.Brightness = brightness;
+    result.Intensity = ripple;
     return result;
 }
 
 float4 main(float4 pos : SV_POSITION, float2 tex : TEXCOORD) : SV_TARGET
 {
     RippleResult ripple = RippledUv(tex);
-    float3 base = CompositeTerminal(ripple.Uv);
+    float2 warpedUv = clamp(tex + ripple.Intensity * RippleDistortion, 0.0, 1.0);
+    float3 base = CompositeTerminal(warpedUv);
     float glyphMask = smoothstep(0.025, 0.22, Luminance(base));
-    float3 color = base * (1.0 + ripple.Brightness * RippleBrightness * glyphMask);
+    float brightness = max(ripple.Intensity, 0.0) * RippleBrightness * glyphMask;
+    float3 color = base * (1.0 + brightness);
 
     return float4(saturate(color), 1.0);
 }
