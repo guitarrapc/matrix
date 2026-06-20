@@ -36,9 +36,22 @@ Normative behavior:
 
 Glyph **mutation** (changing a cell to another character from the pool) may still occur while the stream falls; only **position** must stay vertically aligned.
 
+### Display-cell grid
+
+The simulation grid is **1:1 with terminal display cells** (`Console.WindowWidth` × `Console.WindowHeight`), not with Unicode code units.
+
+| Mode | Stream anchor | Glyph width |
+|---|---|---|
+| ascii-matrix / single | Any display column | 1 cell |
+| movie | Even display columns only (`0`, `2`, `4`, …) where a pair fits | 2 cells |
+
+A wide glyph occupies an **anchor cell** (carries state and glyph) and a **Continuation** cell to its right (marks the second display cell). When rendering left-to-right, **Continuation emits no bytes** — not even a space — because the anchor glyph already advanced the terminal cursor by two cells. Emitting a space in the Continuation cell was a source of horizontal drift and crooked vertical lines.
+
+Stream updates shift anchor and Continuation cells **together** as a pair.
+
 ### Cell display states
 
-Each terminal cell is in exactly one of four states:
+Each terminal display cell is in exactly one of five states:
 
 | State | Appearance | Role |
 |---|---|---|
@@ -46,6 +59,7 @@ Each terminal cell is in exactly one of four states:
 | **Dim** | Dark green (configurable) | Upper trail (farther above the Head) |
 | **Bright** | Highlight green (configurable) | Lower trail (near the Head) |
 | **Head** | White (configurable) | Leading edge at the bottom of the active segment |
+| **Continuation** | (nothing written) | Second display cell of a wide glyph; render skips it |
 
 Within an active stream, state is determined by **distance from the Head** (fixed bands), not by per-cell random fading:
 
@@ -99,7 +113,7 @@ In all modes, individual cells **randomly change to another character from the a
 
 **movie** mode requires a **UTF-8 capable terminal**. If UTF-8 output cannot be established at startup, the process exits with an error. There is no fallback to ascii-matrix for movie mode.
 
-The movie character pool includes katakana (清音・濁音・半濁音中心), `A–Z`, `0–9`, and symbols `:・."=*+-<>`.
+The movie character pool includes katakana (清音・濁音・半濁音中心), `A–Z`, `0–9`, and symbols `:・."=*+-<>`. **Active streams use only full-width (two-cell) glyphs** (katakana in practice) on **even display columns**, with the following cell marked **Continuation**, so each column stays vertically aligned in the terminal.
 
 ### Mode conflicts
 
@@ -302,3 +316,4 @@ Archives use `.tar.gz` on Unix-like platforms and `.zip` on Windows.
 - **True Color detection stays conservative:** `TERM=xterm-256color` alone must not enable 24-bit output; environment signals (`COLORTERM`, `WT_SESSION`, etc.) remain the gate.
 - **Hot-path rendering:** pre-built ANSI byte sequences, `ArrayPool` grids/buffers, and a single `Stream.Write` + `Flush` per frame keep allocations out of the animation loop; palette and glyph pools are initialized once at startup.
 - **Vertical motion must be explicit in the spec:** the film reads as straight-line falls because each stream moves down as one contiguous segment. An early design treated **Dim → Empty** as high per-frame probability anywhere in the column; that produced scattered, flickering cells and did **not** look like Matrix rain. **Black belongs mostly between columns**, not inside active trails. The visual spec was revised; animation now **shifts each column down as a unit** and assigns Bright/Dim by distance from the Head.
+- **Terminal cell width ≠ one code unit in movie mode:** katakana is **full-width (two terminal cells)**; half-width ASCII is one cell. Placing both in the same logical column breaks vertical alignment, and adjacent streams collide when a wide glyph spans into the next column. Movie mode uses **even column indices**, **full-width glyphs only**, and a **Continuation** display cell whose render output is empty. Earlier fixes that cleared odd columns but still **printed a space** there caused cursor drift and crooked lines; the display-cell grid removes that spurious output.

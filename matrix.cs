@@ -145,6 +145,8 @@ internal enum CellState : byte
     Dim = 1,
     Bright = 2,
     Head = 3,
+    /// <summary>Right display cell of a wide glyph; nothing is written when rendering.</summary>
+    Continuation = 4,
 }
 
 internal static class EngineConstants
@@ -681,6 +683,9 @@ internal sealed class AnsiPalette
             for (var x = 0; x < width; x++)
             {
                 ref readonly var cell = ref grid[row + x];
+                if (cell.State == (byte)CellState.Continuation)
+                    continue;
+
                 if (cell.State == (byte)CellState.Empty)
                 {
                     AppendBytes(buffer, ref pos, _space);
@@ -732,12 +737,14 @@ internal sealed class GlyphPool
     private readonly string _chars;
     private readonly char _singleChar;
     private readonly bool _single;
+    internal readonly bool RequiresWideColumns;
 
-    private GlyphPool(string chars, char singleChar, bool single)
+    private GlyphPool(string chars, char singleChar, bool single, bool requiresWideColumns)
     {
         _chars = chars;
         _singleChar = singleChar;
         _single = single;
+        RequiresWideColumns = requiresWideColumns;
     }
 
     internal static GlyphPool Create(GlyphMode mode, char singleChar)
@@ -745,12 +752,12 @@ internal sealed class GlyphPool
         switch (mode)
         {
             case GlyphMode.Single:
-                return new GlyphPool(string.Empty, singleChar, true);
+                return new GlyphPool(string.Empty, singleChar, true, requiresWideColumns: false);
             case GlyphMode.Movie:
                 EnsureUtf8();
-                return new GlyphPool(MovieChars, '\0', false);
+                return new GlyphPool(MovieStreamChars, '\0', false, requiresWideColumns: true);
             default:
-                return new GlyphPool(AsciiMatrixChars, '\0', false);
+                return new GlyphPool(AsciiMatrixChars, '\0', false, requiresWideColumns: false);
         }
     }
 
@@ -774,16 +781,17 @@ internal sealed class GlyphPool
         _single ? _singleChar : _chars[rng.Next(_chars.Length)];
 
     private const string AsciiMatrixChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@#$%^&*()";
-    private const string MovieChars =
+    // Full-width katakana only — half-width Latin/digits break vertical alignment in terminals.
+    private const string MovieStreamChars =
         "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン" +
-        "ガギグゲゴザジズゼゾダヂヅデドバビブベボパピプペポヴヰヱ" +
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:・.\"=*+-<>";
+        "ガギグゲゴザジズゼゾダヂヅデドバビブベボパピプペポヴヰヱ";
 }
 
 internal sealed class MatrixEngine
 {
     private readonly GlyphPool _pool;
     private readonly AnsiPalette _palette;
+    private readonly bool _wideColumns;
     private readonly Random _rng = new();
 
     private Cell[] _grid = [];
@@ -796,6 +804,7 @@ internal sealed class MatrixEngine
     {
         _pool = pool;
         _palette = palette;
+        _wideColumns = pool.RequiresWideColumns;
         Resize();
     }
 
@@ -812,8 +821,16 @@ internal sealed class MatrixEngine
             Resize(width, height);
 
         for (var x = 0; x < _width; x++)
+        {
+            if (_wideColumns && (x & 1) == 1)
+                continue;
             UpdateColumn(x);
+        }
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool IsStreamColumn(int x) =>
+        !_wideColumns || ((x & 1) == 0 && x + 1 < _width);
 
     internal void Render(Stream stdout)
     {
@@ -848,7 +865,7 @@ internal sealed class MatrixEngine
         for (var x = 0; x < _width; x++)
         {
             _columns[x] = default;
-            if (_rng.Next(100) < EngineConstants.InitialActivePercent)
+            if (IsStreamColumn(x) && _rng.Next(100) < EngineConstants.InitialActivePercent)
                 ActivateColumn(x);
         }
     }
@@ -878,19 +895,18 @@ internal sealed class MatrixEngine
         var headY = column.HeadY;
         for (var y = 0; y < _height; y++)
         {
-            ref var cell = ref _grid[y * _width + x];
             if (y < trailTop || y > headY)
             {
-                cell.State = (byte)CellState.Empty;
-                cell.Glyph = '\0';
+                ClearDisplayCells(x, y);
                 continue;
             }
 
             var dist = headY - y;
-            if (cell.State == (byte)CellState.Empty)
+            ref var cell = ref _grid[y * _width + x];
+            if (cell.State is (byte)CellState.Empty or (byte)CellState.Continuation)
                 cell.Glyph = _pool.Pick(_rng);
 
-            cell.State = dist == 0
+            var state = dist == 0
                 ? (byte)CellState.Head
                 : dist <= EngineConstants.BrightDistance
                     ? (byte)CellState.Bright
@@ -898,6 +914,34 @@ internal sealed class MatrixEngine
 
             if (_rng.Next(100) < EngineConstants.GlyphMutationChance)
                 cell.Glyph = _pool.Pick(_rng);
+
+            SetDisplayGlyph(x, y, state, cell.Glyph);
+        }
+    }
+
+    private void SetDisplayGlyph(int x, int y, byte state, char glyph)
+    {
+        ref var cell = ref _grid[y * _width + x];
+        cell.State = state;
+        cell.Glyph = glyph;
+        if (_wideColumns && x + 1 < _width)
+        {
+            ref var cont = ref _grid[y * _width + x + 1];
+            cont.State = (byte)CellState.Continuation;
+            cont.Glyph = '\0';
+        }
+    }
+
+    private void ClearDisplayCells(int x, int y)
+    {
+        ref var cell = ref _grid[y * _width + x];
+        cell.State = (byte)CellState.Empty;
+        cell.Glyph = '\0';
+        if (_wideColumns && x + 1 < _width)
+        {
+            ref var cont = ref _grid[y * _width + x + 1];
+            cont.State = (byte)CellState.Empty;
+            cont.Glyph = '\0';
         }
     }
 
@@ -906,20 +950,20 @@ internal sealed class MatrixEngine
         if (speed <= 0)
             return;
 
+        var span = _wideColumns ? 2 : 1;
         var limit = Math.Min(speed, _height);
         for (var y = _height - 1; y >= limit; y--)
         {
-            ref var dest = ref _grid[y * _width + x];
-            ref var src = ref _grid[(y - limit) * _width + x];
-            dest = src;
+            for (var dx = 0; dx < span && x + dx < _width; dx++)
+            {
+                ref var dest = ref _grid[y * _width + x + dx];
+                ref var src = ref _grid[(y - limit) * _width + x + dx];
+                dest = src;
+            }
         }
 
         for (var y = 0; y < limit; y++)
-        {
-            ref var cell = ref _grid[y * _width + x];
-            cell.State = (byte)CellState.Empty;
-            cell.Glyph = '\0';
-        }
+            ClearDisplayCells(x, y);
     }
 
     private void ActivateColumn(int x)
@@ -936,11 +980,7 @@ internal sealed class MatrixEngine
     private void ClearColumn(int x)
     {
         for (var y = 0; y < _height; y++)
-        {
-            ref var cell = ref _grid[y * _width + x];
-            cell.State = (byte)CellState.Empty;
-            cell.Glyph = '\0';
-        }
+            ClearDisplayCells(x, y);
     }
 }
 
