@@ -6,7 +6,7 @@
 //   2. Open a NEW tab after saving settings.
 //   3. Enable the shader: Command Palette (Ctrl+Shift+P) → "Toggle shader effects"
 //      (pixel shaders are OFF by default even when a path is set).
-//   4. Run: matrix --shader-bloom on
+//   4. Tune bloom constants below if the glow is too strong or too soft.
 
 Texture2D shaderTexture;
 SamplerState samplerState;
