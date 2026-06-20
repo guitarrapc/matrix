@@ -44,11 +44,15 @@ if (Console.IsOutputRedirected)
     Environment.Exit(1);
 }
 
+var terminal = TerminalProfile.Detect();
 var useTrueColor = TerminalCapabilities.EnableVirtualTerminalIfNeeded() && TerminalCapabilities.SupportsTrueColor();
 if (!useTrueColor)
 {
     Console.Error.WriteLine("warning: true color not supported; falling back to 16-color palette");
 }
+
+ShaderBloomSupport.WriteStartupNotes(options, terminal);
+var cursorIntensity = options.ResolveCursorIntensity(terminal);
 
 var keyExitEnabled = !Console.IsInputRedirected;
 if (!keyExitEnabled)
@@ -69,7 +73,7 @@ catch (InvalidOperationException ex)
     return;
 }
 
-var palette = AnsiPalette.Create(options.Colors, useTrueColor, options.CursorIntensity);
+var palette = AnsiPalette.Create(options.Colors, useTrueColor, cursorIntensity);
 using var engine = new MatrixEngine(pool, palette, options.Density, options.Fps);
 var frameDelayMs = 1000.0 / options.Fps;
 
@@ -177,6 +181,8 @@ internal static class EngineConstants
     internal const double RaindropLength = 0.75;
     internal const double DitherMagnitude = 0.05;
     internal const double DefaultCursorIntensity = 2.5;
+    /// <summary>Head additive bloom when the terminal applies a GPU bloom shader.</summary>
+    internal const double ShaderBloomCursorIntensity = 1.0;
     internal const int LutTailFadeEnd = 38;
     internal const int LutDimIndex = 64;
     internal const int LutBrightIndex = 191;
@@ -237,6 +243,13 @@ internal readonly struct ColorValue
     }
 }
 
+internal enum ShaderBloomMode
+{
+    Auto,
+    On,
+    Off,
+}
+
 internal sealed class CliOptions
 {
     internal GlyphMode Mode { get; private init; } = GlyphMode.AsciiMatrix;
@@ -248,7 +261,23 @@ internal sealed class CliOptions
     internal ColorOptions Colors { get; private init; } = ColorOptions.Default;
     internal double Density { get; private init; } = EngineConstants.DefaultDensity;
     internal double CursorIntensity { get; private init; } = EngineConstants.DefaultCursorIntensity;
+    internal bool HasExplicitCursorIntensity { get; private init; }
+    internal ShaderBloomMode ShaderBloom { get; private init; } = ShaderBloomMode.Auto;
     internal int Fps { get; private init; } = EngineConstants.DefaultTargetFps;
+
+    internal bool IsShaderBloomActive(TerminalProfile terminal) =>
+        ShaderBloom switch
+        {
+            ShaderBloomMode.On => true,
+            ShaderBloomMode.Off => false,
+            ShaderBloomMode.Auto => terminal.SupportsTerminalShaders,
+            _ => false,
+        };
+
+    internal double ResolveCursorIntensity(TerminalProfile terminal) =>
+        IsShaderBloomActive(terminal) && !HasExplicitCursorIntensity
+            ? EngineConstants.ShaderBloomCursorIntensity
+            : CursorIntensity;
 
     internal static CliOptions Parse(string[] args)
     {
@@ -263,6 +292,8 @@ internal sealed class CliOptions
         var hasPositionalDuration = false;
         ColorValue? bg = null, head = null, bright = null, dim = null;
         var cursorIntensity = EngineConstants.DefaultCursorIntensity;
+        var hasCursorIntensityFlag = false;
+        var shaderBloom = ShaderBloomMode.Auto;
         var fps = EngineConstants.DefaultTargetFps;
 
         for (var i = 0; i < args.Length; i++)
@@ -339,6 +370,13 @@ internal sealed class CliOptions
                         return Error("missing value for --cursor-intensity");
                     if (!TryParseCursorIntensity(args[i], out cursorIntensity))
                         return Error("invalid --cursor-intensity value (expected 0.5 to 5.0)");
+                    hasCursorIntensityFlag = true;
+                    break;
+                case "--shader-bloom":
+                    if (++i >= args.Length)
+                        return Error("missing value for --shader-bloom");
+                    if (!TryParseShaderBloom(args[i], out shaderBloom))
+                        return Error("invalid --shader-bloom value (expected auto, on, or off)");
                     break;
                 case "--fps":
                     if (++i >= args.Length)
@@ -377,6 +415,8 @@ internal sealed class CliOptions
             DurationSeconds = duration,
             Density = density,
             CursorIntensity = cursorIntensity,
+            HasExplicitCursorIntensity = hasCursorIntensityFlag,
+            ShaderBloom = shaderBloom,
             Fps = fps,
             Colors = new ColorOptions(
                 bg ?? ColorOptions.DefaultBackground,
@@ -416,6 +456,30 @@ internal sealed class CliOptions
         if (!int.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out fps))
             return false;
         return fps is >= EngineConstants.MinTargetFps and <= EngineConstants.MaxTargetFps;
+    }
+
+    private static bool TryParseShaderBloom(ReadOnlySpan<char> text, out ShaderBloomMode mode)
+    {
+        if (text.Equals("auto", StringComparison.OrdinalIgnoreCase))
+        {
+            mode = ShaderBloomMode.Auto;
+            return true;
+        }
+
+        if (text.Equals("on", StringComparison.OrdinalIgnoreCase))
+        {
+            mode = ShaderBloomMode.On;
+            return true;
+        }
+
+        if (text.Equals("off", StringComparison.OrdinalIgnoreCase))
+        {
+            mode = ShaderBloomMode.Off;
+            return true;
+        }
+
+        mode = default;
+        return false;
     }
 }
 
@@ -575,6 +639,51 @@ internal static class ColorParser
         }
 
         return best;
+    }
+}
+
+internal readonly struct TerminalProfile
+{
+    internal bool IsParTerm { get; init; }
+    internal bool IsWindowsTerminal { get; init; }
+    internal bool SupportsTerminalShaders => IsParTerm || IsWindowsTerminal;
+
+    internal static TerminalProfile Detect() => new()
+    {
+        IsParTerm = string.Equals(Environment.GetEnvironmentVariable("__PAR_TERM"), "1", StringComparison.Ordinal),
+        IsWindowsTerminal = !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_SESSION")),
+    };
+}
+
+internal static class ShaderBloomSupport
+{
+    internal static void WriteStartupNotes(CliOptions options, TerminalProfile terminal)
+    {
+        if (!options.IsShaderBloomActive(terminal))
+            return;
+
+        if (terminal.IsParTerm)
+        {
+            Console.Error.WriteLine(
+                "note: par-term + shader-bloom: set custom_shader to bloom.glsl (install-shaders) " +
+                "or bloom-matrix.glsl with custom_shader_full_content: true. " +
+                "See shaders/par-term/config.example.yaml.");
+            return;
+        }
+
+        if (terminal.IsWindowsTerminal)
+        {
+            Console.Error.WriteLine(
+                "note: Windows Terminal + shader-bloom: set experimental.pixelShaderPath to " +
+                "shaders/windows-terminal/matrix-bloom.hlsl, open a new tab, then run " +
+                "\"Toggle shader effects\" from the command palette (Ctrl+Shift+P). " +
+                "Shaders are off by default.");
+            return;
+        }
+
+        Console.Error.WriteLine(
+            "warning: --shader-bloom active but terminal is not par-term or Windows Terminal; " +
+            "software head bloom is reduced — enable a terminal shader for the full effect.");
     }
 }
 
@@ -1664,6 +1773,7 @@ Usage:
   matrix --fps <1-60>
   matrix --bg <color> --head <color> --bright <color> --dim <color>
   matrix --cursor-intensity <0.5-5.0>
+  matrix --shader-bloom <auto|on|off>
   matrix --help
   matrix --version
 
@@ -1690,6 +1800,10 @@ Colors:
   Hex (#RGB or #RRGGBB) or 16-color names (black, green, darkgreen, ...).
   Defaults: --bg #000000 --head #FFFFFF --bright #30FF58 --dim #00AA1C
   --cursor-intensity  Head-cell bloom strength (additive --head). Default 2.5.
+  --shader-bloom      Terminal GPU bloom (default auto). Auto enables for par-term and
+                      Windows Terminal, lowering software head bloom to 1.0 unless
+                      --cursor-intensity is set. WT: toggle shader effects in the
+                      command palette after setting experimental.pixelShaderPath.
 
 Examples:
   matrix

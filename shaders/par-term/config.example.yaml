@@ -1,0 +1,25 @@
+# par-term setup for matrix CLI GPU bloom
+#
+# Recommended first try (bundled shader, no copy needed):
+#   par-term install-shaders
+#   custom_shader: "bloom.glsl"
+#
+# Matrix-tuned variant (green tint):
+#   1. Copy bloom-matrix.glsl next to this file into your par-term shaders folder:
+#        Windows: %USERPROFILE%\.config\par-term\shaders\
+#        macOS/Linux: ~/.config/par-term/shaders/
+#   2. Merge the settings below into config.yaml
+#   3. Press F5 to reload config (or restart par-term)
+#   4. Run: matrix --shader-bloom auto
+
+custom_shader: "bloom-matrix.glsl"
+custom_shader_enabled: true
+custom_shader_full_content: true
+shader_hot_reload: true
+
+shader_configs:
+  bloom-matrix.glsl:
+    iBloomIntensity: 1.4
+    iBloomRadius: 1.6
+    iBloomThreshold: 0.10
+    iBloomTint: "#30FF58"
