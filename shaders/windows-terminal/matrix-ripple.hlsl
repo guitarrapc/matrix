@@ -7,7 +7,7 @@
 //
 // Setup (all required):
 //   1. settings.json profile:
-//        "experimental.pixelShaderPath": "D:\\github\\guitarrapc\\matrix\\shaders\\windows-terminal\\matrix-ripple.hlsl"
+//        "experimental.pixelShaderPath": "..\\matrix-ripple.hlsl"
 //   2. Open a NEW tab after saving settings.
 //   3. Enable the shader: Command Palette (Ctrl+Shift+P) -> "Toggle shader effects"
 //      (pixel shaders are OFF by default even when a path is set).
@@ -29,7 +29,7 @@ static const float RippleSpeed = 0.24;
 static const float RippleFrequency = 40.0;
 static const float RippleWidth = 0.34;
 static const float RippleDistortion = 0.001;
-static const float RippleBrightness = 0.18;
+static const float RippleBrightness = 0.36;
 static const float2 RippleOriginMin = float2(0.18, 0.18);
 static const float2 RippleOriginMax = float2(0.82, 0.72);
 static const float3 LumWeights = float3(0.299, 0.587, 0.114);
@@ -91,7 +91,7 @@ float4 main(float4 pos : SV_POSITION, float2 tex : TEXCOORD) : SV_TARGET
     RippleResult ripple = RippledUv(tex);
     float2 warpedUv = clamp(tex + ripple.Intensity * RippleDistortion, 0.0, 1.0);
     float3 base = CompositeTerminal(warpedUv);
-    float glyphMask = smoothstep(0.025, 0.22, Luminance(base));
+    float glyphMask = smoothstep(0.018, 0.18, Luminance(base));
     float brightness = max(ripple.Intensity, 0.0) * RippleBrightness * glyphMask;
     float3 color = base * (1.0 + brightness);
 
