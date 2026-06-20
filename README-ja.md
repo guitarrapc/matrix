@@ -81,7 +81,7 @@ Windows Terminal 向けのピクセルシェーダー例は `shaders/windows-ter
 
 Windows Terminal のプロファイルで `experimental.pixelShaderPath` を設定し、新しいタブを開いてからコマンドパレットで "Toggle shader effects" を実行してください。最小構成の設定例として `shaders/windows-terminal/config.example.json` を利用できます。
 
-> ![TIPS]
+> ![TIP]
 > [Windows Terminal の shader](https://github.com/microsoft/terminal/tree/main/samples/PixelShaders) 入力には、時刻、解像度、背景色、描画済みターミナルテクスチャが含まれます。マウスクリック座標は含まれないため、`matrix-ripple.hlsl` は固定された時限リップル起点を使います。
 
 ## Development
