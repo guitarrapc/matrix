@@ -148,11 +148,11 @@ internal enum CellState : byte
 
 internal static class EngineConstants
 {
-    internal const int TargetFps = 18;
+    internal const int TargetFps = 14;
     internal const int FrameDelayMs = 1000 / TargetFps;
     internal const int GlyphMutationChance = 8;
     internal const int MinSpeed = 1;
-    internal const int MaxSpeed = 3;
+    internal const int MaxSpeed = 2;
     internal const double DefaultDensity = 0.55;
     internal const int DensityActiveBasePercent = 55;
     internal const int DensitySpawnBasePercent = 6;
@@ -160,8 +160,9 @@ internal static class EngineConstants
     internal const double TrailMinHeightFraction = 0.15;
     internal const double TrailMaxHeightFraction = 0.90;
     internal const int MinTrailCells = 4;
-    internal const double FadeSegment1End = 0.15;
-    internal const double FadeSegment2End = 0.60;
+    internal const double FadeSegment1End = 0.06;
+    internal const double FadeSegment2End = 0.38;
+    internal const double HeadIntensityBoost = 1.28;
 }
 
 internal readonly struct Rgb(byte r, byte g, byte b)
@@ -583,12 +584,35 @@ internal sealed class ColorGradient(Rgb head, Rgb bright, Rgb dim, Rgb bg)
 
     internal Rgb Sample(byte fade)
     {
+        if (fade == 0)
+            return Intensify(_head);
+
         var t = fade / 255.0;
         if (t <= EngineConstants.FadeSegment1End)
-            return Lerp(_head, _bright, t / EngineConstants.FadeSegment1End);
+        {
+            var u = t / EngineConstants.FadeSegment1End;
+            return Lerp(Intensify(_head), _bright, u * u);
+        }
+
         if (t <= EngineConstants.FadeSegment2End)
-            return Lerp(_bright, _dim, (t - EngineConstants.FadeSegment1End) / (EngineConstants.FadeSegment2End - EngineConstants.FadeSegment1End));
-        return Lerp(_dim, _bg, (t - EngineConstants.FadeSegment2End) / (1.0 - EngineConstants.FadeSegment2End));
+        {
+            var u = (t - EngineConstants.FadeSegment1End) / (EngineConstants.FadeSegment2End - EngineConstants.FadeSegment1End);
+            return Lerp(_bright, _dim, u);
+        }
+
+        var tail = (t - EngineConstants.FadeSegment2End) / (1.0 - EngineConstants.FadeSegment2End);
+        tail *= tail * tail;
+        return Lerp(_dim, _bg, tail);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private Rgb Intensify(Rgb color)
+    {
+        var boost = EngineConstants.HeadIntensityBoost;
+        return new Rgb(
+            (byte)Math.Min(255, color.R * boost),
+            (byte)Math.Min(255, color.G * boost),
+            (byte)Math.Min(255, color.B * boost));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

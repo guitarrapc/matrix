@@ -67,9 +67,10 @@ At render time, Fade maps through **four CLI colors** in three linear segments:
 
 | Fade range (`t`) | Interpolation |
 |---|---|
-| `t ≤ 0.15` | `--head` → `--bright` |
-| `t ≤ 0.60` | `--bright` → `--dim` |
-| `t ≤ 1.00` | `--dim` → `--bg` |
+| `t = 0` | `--head` with intensity boost |
+| `t ≤ 0.06` | boosted `--head` → `--bright` (ease-out near head) |
+| `t ≤ 0.38` | `--bright` → `--dim` |
+| `t ≤ 1.00` | `--dim` → `--bg` (cubic ease-in; long tail fade) |
 
 **True Color:** interpolated RGB as 24-bit ANSI. **16-color fallback:** interpolate then map to the nearest named color.
 
@@ -77,7 +78,7 @@ Within an active stream, **Dim → Empty** occurs only when the cell leaves the 
 
 ### Frame rate and terminal presentation
 
-- Target frame rate: **~18 FPS** (within the 15–20 FPS range).
+- Target frame rate: **~14 FPS**.
 - The animation runs on the **alternate screen buffer** so scrollback history is not polluted.
 - The cursor is hidden during playback and restored on exit.
 - On exit (timeout or user input), the terminal is restored to its pre-animation state with no trailing message.
@@ -87,10 +88,10 @@ Within an active stream, **Dim → Empty** occurs only when the cell leaves the 
 
 | Parameter | Value |
 |---|---|
-| Target FPS | 18 |
+| Target FPS | 14 |
 | `--density` | **0.0–1.0**, default **0.55** (see below) |
 | Trail length | Per stream at spawn: **height × 0.15 … height × 0.90** (minimum 4 cells), random |
-| Fall speed | 1–3 cells per frame (random per column); entire stream shifts by this amount |
+| Fall speed | 1–2 cells per frame (random per column); entire stream shifts by this amount |
 | Glyph mutation | ~8% chance per frame per visible cell in stream |
 | Movie density boost | Effective density **× 1.5** (capped at 1.0) to offset even-column spacing |
 
@@ -308,7 +309,7 @@ Archives use `.tar.gz` on Unix-like platforms and `.zip` on Windows.
 | ascii-matrix default; movie mode optional | Broad terminal compatibility by default; authentic script when UTF-8 is available |
 | True Color hex + named colors + 16-color fallback | Rich defaults on modern terminals; graceful degradation elsewhere |
 | Alternate screen + restore | Preserves shell scrollback and prompt UX |
-| ~18 FPS, fixed tuning in v1 | Smooth enough for the effect; avoids CLI complexity and tuning burden |
+| ~14 FPS, slower column shift | Closer to the film’s unhurried fall |
 | Key exit without Enter | Immediate “press any key to dismiss” UX for demos |
 | Native AOT self-contained per RID | Standalone `.exe` / binary with no shared runtime install |
 | TTY required on stdout (v1) | Alternate screen, colors, and keyboard handling assume an interactive terminal |
@@ -325,3 +326,4 @@ Archives use `.tar.gz` on Unix-like platforms and `.zip` on Windows.
 - **Vertical motion must be explicit in the spec:** the film reads as straight-line falls because each stream moves down as one contiguous segment. An early design treated **Dim → Empty** as high per-frame probability anywhere in the column; that produced scattered, flickering cells and did **not** look like Matrix rain. **Black belongs mostly between columns**, not inside active trails. The visual spec was revised; animation now **shifts each column down as a unit** and assigns Bright/Dim by distance from the Head.
 - **Terminal cell width ≠ one code unit in movie mode:** katakana is **full-width (two terminal cells)**; half-width ASCII is one cell. Placing both in the same logical column breaks vertical alignment, and adjacent streams collide when a wide glyph spans into the next column. Movie mode uses **even column indices**, **full-width glyphs only**, and a **Continuation** display cell whose render output is empty. Earlier fixes that cleared odd columns but still **printed a space** there caused cursor drift and crooked lines; the display-cell grid removes that spurious output.
 - **Discrete Head/Bright/Dim states were too coarse for the film look:** a **Fade** byte plus piecewise RGB interpolation across `--head` / `--bright` / `--dim` / `--bg` better matches gradual trail falloff. Sixteen-color terminals use the same Fade curve with nearest-color quantization.
+- **Tail fade needs a long dim→background segment:** a cubic ease on the upper ~62% of the trail keeps characters visible as dark green longer before melting into black; the head uses a short boosted zone (`t ≤ 0.06`) so the leading glyph pops against the trail.
