@@ -155,13 +155,15 @@ internal static class EngineConstants
     internal const int MaxSpeed = 2;
     internal const double DefaultDensity = 0.55;
     internal const double DefaultMovieDensity = 0.7;
-    internal const int DensityActiveBasePercent = 80;
+    internal const int DensityActiveBasePercent = 90;
     internal const double MovieDensityBoost = 1.5;
     /// <summary>Average cells a stream travels before deactivating ≈ factor × height (see spawn equilibrium).</summary>
-    internal const double StreamLifetimeHeightFactor = 1.85;
+    internal const double StreamLifetimeHeightFactor = 1.55;
     internal const double AvgFallSpeedCells = (MinSpeed + MaxSpeed) / 2.0;
-    /// <summary>Frames to close an active-column deficit when below density target (~0.5s at 14 FPS).</summary>
-    internal const int DensityRecoveryFrames = 7;
+    /// <summary>Frames to close an active-column deficit when below density target (~0.2s at 14 FPS).</summary>
+    internal const int DensityRecoveryFrames = 3;
+    /// <summary>Baseline spawn multiplier at/above target — compensates lifetime model error and ongoing deaths.</summary>
+    internal const double DensitySpawnHeadroom = 1.45;
     internal const double TrailMinHeightFraction = 0.30;
     internal const double TrailMaxHeightFraction = 0.90;
     internal const int MinTrailCells = 10;
@@ -1048,11 +1050,13 @@ internal sealed class MatrixEngine
             return;
         }
 
-        var targetActive = (int)Math.Round(_activeChancePercent / 100.0 * streamCount);
+        var targetActive = (int)Math.Ceiling(_activeChancePercent / 100.0 * streamCount);
         var deficit = targetActive - activeCount;
+        var headroomSpawn = Math.Min(100, (int)Math.Round(_baseSpawnChancePercent * EngineConstants.DensitySpawnHeadroom));
+
         if (deficit <= 0)
         {
-            _spawnChancePercent = _baseSpawnChancePercent;
+            _spawnChancePercent = headroomSpawn;
             return;
         }
 
@@ -1065,7 +1069,7 @@ internal sealed class MatrixEngine
 
         var neededPerFrame = deficit / (double)EngineConstants.DensityRecoveryFrames;
         var adaptivePercent = (int)Math.Ceiling(neededPerFrame / inactive * 100);
-        _spawnChancePercent = Math.Min(100, Math.Max(_baseSpawnChancePercent, adaptivePercent));
+        _spawnChancePercent = Math.Min(100, Math.Max(headroomSpawn, adaptivePercent));
     }
 
     /// <summary>Per-frame spawn % so steady active fraction ≈ initial active chance (births = deaths).</summary>
