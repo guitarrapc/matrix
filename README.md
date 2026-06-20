@@ -81,7 +81,7 @@ Windows Terminal pixel shader examples live in `shaders/windows-terminal`:
 
 Set `experimental.pixelShaderPath` in a Windows Terminal profile, open a new tab, then run "Toggle shader effects" from the command palette. Use `shaders/windows-terminal/config.example.json` as a minimal settings example.
 
-> ![INFO]
+> ![TIPS]
 > [Windows Terminal's shader](https://github.com/microsoft/terminal/tree/main/samples/PixelShaders) inputs include time, resolution, background color, and the rendered terminal texture. They do not include mouse click coordinates, so `matrix-ripple.hlsl` uses fixed timed ripple origins.
 
 ## Development
