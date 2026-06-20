@@ -1,0 +1,101 @@
+name: Build
+
+concurrency:
+  group: nativeaot-build-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Publish ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: windows-latest
+            rid: win-x64
+          - os: macos-latest
+            rid: osx-arm64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@9a946fdbd5fb07b82b2f5a4466058b876ab72bb2 # v5.3.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publish NativeAOT binary
+        shell: bash
+        run: |
+          artifact_dir="$GITHUB_WORKSPACE/artifacts/${{ matrix.rid }}"
+          mkdir -p "$artifact_dir"
+          dotnet publish matrix.cs -c Release -r "${{ matrix.rid }}" --self-contained true -p:PublishAot=true -p:StripSymbols=true -p:DebugType=None -o "$artifact_dir"
+
+      - name: Smoke test published binary
+        shell: bash
+        run: |
+          artifact_dir="$GITHUB_WORKSPACE/artifacts/${{ matrix.rid }}"
+          binary_name="matrix"
+          if [[ "${{ matrix.rid }}" == win-* ]]; then
+            binary_name="matrix.exe"
+          fi
+
+          binary_path="$artifact_dir/$binary_name"
+          if [[ ! -x "$binary_path" ]]; then
+            echo "Expected executable was not found: $binary_path" >&2
+            ls -la "$artifact_dir" >&2
+            exit 1
+          fi
+
+          help_output="$("$binary_path" --help)"
+          if [[ "$help_output" != *"Usage:"* ]] || [[ "$help_output" != *"matrix --version"* ]]; then
+            echo "Unexpected --help output:" >&2
+            printf '%s\n' "$help_output" >&2
+            exit 1
+          fi
+
+          version_output="$("$binary_path" --version)"
+          if [[ ! "$version_output" =~ ^matrix[[:space:]][0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unexpected --version output: $version_output" >&2
+            exit 1
+          fi
+
+          set +e
+          invalid_output="$("$binary_path" --density 2 2>&1)"
+          invalid_status=$?
+          set -e
+          if [[ $invalid_status -eq 0 ]] || [[ "$invalid_output" != *"invalid --density value"* ]]; then
+            echo "Expected --density 2 to fail with a validation error." >&2
+            echo "Exit status: $invalid_status" >&2
+            printf '%s\n' "$invalid_output" >&2
+            exit 1
+          fi
+
+          set +e
+          redirected_output="$("$binary_path" --duration 0.01 2>&1)"
+          redirected_status=$?
+          set -e
+          if [[ $redirected_status -eq 0 ]] || [[ "$redirected_output" != *"animation requires a TTY on stdout"* ]]; then
+            echo "Expected redirected animation to fail with a TTY error." >&2
+            echo "Exit status: $redirected_status" >&2
+            printf '%s\n' "$redirected_output" >&2
+            exit 1
+          fi
