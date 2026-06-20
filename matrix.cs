@@ -160,6 +160,13 @@ internal static class EngineConstants
     internal const double TrailMinHeightFraction = 0.15;
     internal const double TrailMaxHeightFraction = 0.90;
     internal const int MinTrailCells = 4;
+    internal const double RainFallSpeed = 0.3;
+    internal const double RaindropLength = 0.75;
+    internal const double DitherMagnitude = 0.05;
+    internal const double CursorIntensity = 2.0;
+    internal const int LutTailFadeEnd = 38;
+    internal const int LutDimIndex = 64;
+    internal const int LutBrightIndex = 191;
 }
 
 internal readonly struct Rgb(byte r, byte g, byte b)
@@ -572,74 +579,92 @@ internal static class TerminalCapabilities
     private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 }
 
-internal sealed class ColorGradient
+internal static class RainBrightness
 {
-    private const double TailFadeStart = 0.85;
-    private const double TailFadeLength = 1.0 - TailFadeStart;
+    private const double Sqrt2 = 1.4142135623730951;
+    private const double Sqrt5 = 2.23606797749979;
 
+    internal static float Compute(int rowY, int gridHeight, double simTime, in ColumnState column)
+    {
+        // Reference shader: glyphPos.y = 0 at bottom; terminal row 0 is top.
+        var glyphY = gridHeight - 1 - rowY;
+        var columnTime = column.TimeOffset + simTime * EngineConstants.RainFallSpeed * column.SpeedOffset;
+        var rainTime = (glyphY * 0.01 + columnTime) / EngineConstants.RaindropLength;
+        rainTime = Wobble(rainTime);
+        return (float)(1.0 - Frac(rainTime));
+    }
+
+    internal static float ColumnTimeOffset(int columnX)
+    {
+        var n = Math.Sin(columnX * 12.9898) * 43758.5453;
+        return (float)(n - Math.Floor(n)) * 1000f;
+    }
+
+    internal static float SpeedOffsetFromColumnSpeed(byte speed) =>
+        0.5f + (speed - EngineConstants.MinSpeed) / (float)(EngineConstants.MaxSpeed - EngineConstants.MinSpeed) * 0.5f;
+
+    private static double Wobble(double x) =>
+        x + 0.3 * Math.Sin(Sqrt2 * x) + 0.2 * Math.Sin(Sqrt5 * x);
+
+    private static double Frac(double x) => x - Math.Floor(x);
+}
+
+internal sealed class BrightnessPalette
+{
+    private readonly Rgb[] _lut = new Rgb[256];
     private readonly Rgb _head;
-    private readonly Rgb _hotBright;
-    private readonly Rgb _bright;
-    private readonly Rgb _dim;
-    private readonly Rgb _bg;
 
-    internal ColorGradient(Rgb head, Rgb bright, Rgb dim, Rgb bg)
+    internal BrightnessPalette(Rgb head, Rgb bright, Rgb dim, Rgb bg)
     {
-        _head = BloomHead(head);
-        _hotBright = LerpRgb(bright, _head, 0.38);
-        _bright = BoostGreen(bright, 1.22);
-        _dim = dim;
-        _bg = bg;
+        _head = head;
+        BuildLut(_lut, head, bright, dim, bg);
     }
 
-    internal Rgb Sample(byte fade)
-    {
-        var t = fade / 255.0;
-        if (t <= 0.06)
-            return LerpRgb(_head, _hotBright, SmoothStep(t / 0.06));
-        if (t <= 0.20)
-            return LerpRgb(_hotBright, _bright, SmoothStep((t - 0.06) / 0.14));
-        if (t <= TailFadeStart)
-            return LerpRgb(_bright, _dim, SmoothStep((t - 0.20) / (TailFadeStart - 0.20)));
+    internal ReadOnlySpan<Rgb> Lut => _lut;
+    internal Rgb HeadColor => _head;
 
-        var u = SmoothStep((t - TailFadeStart) / TailFadeLength);
-        return FadeToBlack(_dim, u);
+    internal Rgb Sample(byte brightnessIndex) => _lut[brightnessIndex];
+
+    private static void BuildLut(Span<Rgb> lut, Rgb head, Rgb bright, Rgb dim, Rgb bg)
+    {
+        var keyframes = new (int index, Rgb rgb)[]
+        {
+            (EngineConstants.LutTailFadeEnd, dim),
+            (EngineConstants.LutDimIndex, dim),
+            (EngineConstants.LutBrightIndex, bright),
+            (255, head),
+        };
+
+        for (var i = 0; i < 256; i++)
+        {
+            if (i <= EngineConstants.LutTailFadeEnd)
+            {
+                var t = i / (double)EngineConstants.LutTailFadeEnd;
+                lut[i] = LerpHuePreserve(bg, dim, t);
+                continue;
+            }
+
+            lut[i] = SampleKeyframesHsl(keyframes, i);
+        }
     }
 
-    /// <summary>Fade by scaling RGB toward zero — preserves green hue, avoids muddy gray midtones.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Rgb FadeToBlack(Rgb color, double amount)
+    private static Rgb SampleKeyframesHsl((int index, Rgb rgb)[] keyframes, int i)
     {
-        var keep = 1.0 - Math.Clamp(amount, 0, 1);
-        return new Rgb(
-            (byte)(color.R * keep),
-            (byte)(color.G * keep),
-            (byte)(color.B * keep));
-    }
+        for (var s = 0; s < keyframes.Length - 1; s++)
+        {
+            if (i <= keyframes[s + 1].index)
+            {
+                var span = keyframes[s + 1].index - keyframes[s].index;
+                var t = span > 0 ? (i - keyframes[s].index) / (double)span : 0;
+                return LerpHsl(keyframes[s].rgb, keyframes[s + 1].rgb, t);
+            }
+        }
 
-    private static Rgb BloomHead(Rgb head)
-    {
-        if (head.R > 240 && head.G > 240 && head.B > 240)
-            return new Rgb(255, 255, 255);
-        return BoostGreen(head, 1.35);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Rgb BoostGreen(Rgb color, double factor) =>
-        new(
-            (byte)Math.Min(255, color.R * factor),
-            (byte)Math.Min(255, color.G * factor),
-            (byte)Math.Min(255, color.B * factor));
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static double SmoothStep(double t)
-    {
-        t = Math.Clamp(t, 0, 1);
-        return t * t * (3 - 2 * t);
+        return keyframes[^1].rgb;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Rgb LerpRgb(Rgb from, Rgb to, double t)
+    private static Rgb LerpHuePreserve(Rgb from, Rgb to, double t)
     {
         t = Math.Clamp(t, 0, 1);
         return new Rgb(
@@ -647,6 +672,94 @@ internal sealed class ColorGradient
             (byte)(from.G + (to.G - from.G) * t),
             (byte)(from.B + (to.B - from.B) * t));
     }
+
+    private static Rgb LerpHsl(Rgb from, Rgb to, double t)
+    {
+        t = Math.Clamp(t, 0, 1);
+        var (h1, s1, l1) = RgbToHsl(from);
+        var (h2, s2, l2) = RgbToHsl(to);
+
+        var dh = h2 - h1;
+        if (dh > 0.5)
+            h1 += 1.0;
+        else if (dh < -0.5)
+            h2 += 1.0;
+
+        var h = (h1 + (h2 - h1) * t) % 1.0;
+        var s = s1 + (s2 - s1) * t;
+        var l = l1 + (l2 - l1) * t;
+        return HslToRgb(h, s, l);
+    }
+
+    private static (double h, double s, double l) RgbToHsl(Rgb c)
+    {
+        var r = c.R / 255.0;
+        var g = c.G / 255.0;
+        var b = c.B / 255.0;
+        var max = Math.Max(r, Math.Max(g, b));
+        var min = Math.Min(r, Math.Min(g, b));
+        var l = (max + min) / 2.0;
+
+        if (Math.Abs(max - min) < 1e-9)
+            return (0, 0, l);
+
+        var d = max - min;
+        var s = l > 0.5 ? d / (2.0 - max - min) : d / (max + min);
+        double h;
+        if (Math.Abs(max - r) < 1e-9)
+            h = (g - b) / d + (g < b ? 6.0 : 0.0);
+        else if (Math.Abs(max - g) < 1e-9)
+            h = (b - r) / d + 2.0;
+        else
+            h = (r - g) / d + 4.0;
+        h /= 6.0;
+        return (h, s, l);
+    }
+
+    private static Rgb HslToRgb(double h, double s, double l)
+    {
+        if (s <= 1e-9)
+        {
+            var gray = (byte)Math.Round(l * 255);
+            return new Rgb(gray, gray, gray);
+        }
+
+        h = (h % 1.0 + 1.0) % 1.0;
+        var q = l < 0.5 ? l * (1.0 + s) : l + s - l * s;
+        var p = 2.0 * l - q;
+
+        static double HueToRgb(double p, double q, double t)
+        {
+            if (t < 0)
+                t += 1;
+            if (t > 1)
+                t -= 1;
+            if (t < 1.0 / 6.0)
+                return p + (q - p) * 6.0 * t;
+            if (t < 0.5)
+                return q;
+            if (t < 2.0 / 3.0)
+                return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+            return p;
+        }
+
+        return new Rgb(
+            (byte)Math.Round(HueToRgb(p, q, h + 1.0 / 3.0) * 255),
+            (byte)Math.Round(HueToRgb(p, q, h) * 255),
+            (byte)Math.Round(HueToRgb(p, q, h - 1.0 / 3.0) * 255));
+    }
+
+    internal static Rgb AddClamped(Rgb baseColor, Rgb addend) =>
+        new(
+            (byte)Math.Min(255, baseColor.R + addend.R),
+            (byte)Math.Min(255, baseColor.G + addend.G),
+            (byte)Math.Min(255, baseColor.B + addend.B));
+
+    internal static Rgb ScaleRgb(Rgb color, double factor) =>
+        new(
+            (byte)Math.Min(255, color.R * factor),
+            (byte)Math.Min(255, color.G * factor),
+            (byte)Math.Min(255, color.B * factor));
 }
 
 internal sealed class AnsiPalette
@@ -655,19 +768,19 @@ internal sealed class AnsiPalette
     private readonly byte[] _bgRowPrefix;
     private readonly byte[] _space = " "u8.ToArray();
     private readonly byte[] _newline = "\n"u8.ToArray();
-    private readonly ColorGradient _gradient;
+    private readonly BrightnessPalette _palette;
     private readonly bool _trueColor;
 
-    private AnsiPalette(byte[] bgRowPrefix, ColorGradient gradient, bool trueColor)
+    private AnsiPalette(byte[] bgRowPrefix, BrightnessPalette palette, bool trueColor)
     {
         _bgRowPrefix = bgRowPrefix;
-        _gradient = gradient;
+        _palette = palette;
         _trueColor = trueColor;
     }
 
     internal static AnsiPalette Create(ColorOptions colors, bool trueColor)
     {
-        var gradient = new ColorGradient(
+        var palette = new BrightnessPalette(
             ResolveRgb(colors.Head),
             ResolveRgb(colors.Bright),
             ResolveRgb(colors.Dim),
@@ -677,7 +790,7 @@ internal sealed class AnsiPalette
             ? BuildTrueColorBgPrefix(ResolveRgb(colors.Background))
             : BuildAnsi16BgPrefix(ResolveNamed(colors.Background));
 
-        return new AnsiPalette(bgPrefix, gradient, trueColor);
+        return new AnsiPalette(bgPrefix, palette, trueColor);
     }
 
     private static Rgb ResolveRgb(ColorValue color) => color.Rgb;
@@ -762,11 +875,12 @@ internal sealed class AnsiPalette
         return count;
     }
 
-    internal void WriteFrame(Stream stdout, ReadOnlySpan<Cell> grid, int width, int height, byte[] buffer)
+    internal void WriteFrame(Stream stdout, ReadOnlySpan<Cell> grid, int width, int height, byte[] buffer, ulong frameNumber)
     {
         var pos = 0;
         AppendBytes(buffer, ref pos, _home);
         Span<byte> fgScratch = stackalloc byte[32];
+        var cursorAddend = BrightnessPalette.ScaleRgb(_palette.HeadColor, EngineConstants.CursorIntensity);
 
         for (var y = 0; y < height; y++)
         {
@@ -784,7 +898,13 @@ internal sealed class AnsiPalette
                     continue;
                 }
 
-                var rgb = _gradient.Sample(cell.Fade);
+                var brightness = cell.Brightness / 255.0;
+                brightness -= Dither(x, y, frameNumber) * (EngineConstants.DitherMagnitude / 3.0);
+                brightness = Math.Clamp(brightness, 0, 1);
+                var rgb = _palette.Sample((byte)(brightness * 255));
+                if (cell.CursorBoost != 0)
+                    rgb = BrightnessPalette.AddClamped(rgb, cursorAddend);
+
                 int fgLen;
                 if (_trueColor)
                     WriteTrueColorSequence(fgScratch, isBackground: false, rgb, out fgLen);
@@ -800,6 +920,12 @@ internal sealed class AnsiPalette
 
         stdout.Write(buffer.AsSpan(0, pos));
         stdout.Flush();
+    }
+
+    private static float Dither(int x, int y, ulong frame)
+    {
+        var n = Math.Sin(x * 12.9898 + y * 78.233 + frame * 0.1) * 43758.5453;
+        return (float)(n - Math.Floor(n));
     }
 
     private static int Ansi16FgCode(ConsoleColor16 color) =>
@@ -831,7 +957,8 @@ internal sealed class AnsiPalette
 internal struct Cell
 {
     internal byte State;
-    internal byte Fade;
+    internal byte Brightness;
+    internal byte CursorBoost;
     internal char Glyph;
 }
 
@@ -904,6 +1031,8 @@ internal sealed class MatrixEngine
     private byte[] _renderBuffer = [];
     private int _width;
     private int _height;
+    private double _simTime;
+    private ulong _frameNumber;
 
     internal MatrixEngine(GlyphPool pool, AnsiPalette palette, double density)
     {
@@ -939,6 +1068,9 @@ internal sealed class MatrixEngine
                 continue;
             UpdateColumn(x);
         }
+
+        _simTime += 1.0 / EngineConstants.TargetFps;
+        _frameNumber++;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -955,7 +1087,7 @@ internal sealed class MatrixEngine
             _renderBuffer = ArrayPool<byte>.Shared.Rent(needed);
         }
 
-        _palette.WriteFrame(stdout, _grid, _width, _height, _renderBuffer);
+        _palette.WriteFrame(stdout, _grid, _width, _height, _renderBuffer, _frameNumber);
     }
 
     private void Resize(int? widthOverride = null, int? heightOverride = null)
@@ -1026,32 +1158,30 @@ internal sealed class MatrixEngine
             if (_rng.Next(100) < EngineConstants.GlyphMutationChance)
                 cell.Glyph = _pool.Pick(_rng);
 
-            var fade = ComputeFade(dist, column.TrailLength);
-            SetDisplayGlyph(x, y, cell.Glyph, fade);
+            var brightness = RainBrightness.Compute(y, _height, _simTime, column);
+            var brightnessBelow = y + 1 < _height
+                ? RainBrightness.Compute(y + 1, _height, _simTime, column)
+                : 0f;
+            var cursorBoost = (byte)(dist == 0 || brightness > brightnessBelow ? 1 : 0);
+            var brightnessByte = (byte)Math.Clamp((int)(brightness * 255), 0, 255);
+            SetDisplayGlyph(x, y, cell.Glyph, brightnessByte, cursorBoost);
         }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static byte ComputeFade(int distanceFromHead, int trailLength)
-    {
-        if (trailLength <= 0)
-            return 0;
-        var fade = distanceFromHead * 255 / trailLength;
-        return fade > 255 ? (byte)255 : (byte)fade;
-    }
-
-    private void SetDisplayGlyph(int x, int y, char glyph, byte fade)
+    private void SetDisplayGlyph(int x, int y, char glyph, byte brightness, byte cursorBoost)
     {
         ref var cell = ref _grid[y * _width + x];
         cell.State = (byte)CellState.Glyph;
         cell.Glyph = glyph;
-        cell.Fade = fade;
+        cell.Brightness = brightness;
+        cell.CursorBoost = cursorBoost;
         if (_wideColumns && x + 1 < _width)
         {
             ref var cont = ref _grid[y * _width + x + 1];
             cont.State = (byte)CellState.Continuation;
             cont.Glyph = '\0';
-            cont.Fade = 0;
+            cont.Brightness = 0;
+            cont.CursorBoost = 0;
         }
     }
 
@@ -1060,13 +1190,15 @@ internal sealed class MatrixEngine
         ref var cell = ref _grid[y * _width + x];
         cell.State = (byte)CellState.Empty;
         cell.Glyph = '\0';
-        cell.Fade = 0;
+        cell.Brightness = 0;
+        cell.CursorBoost = 0;
         if (_wideColumns && x + 1 < _width)
         {
             ref var cont = ref _grid[y * _width + x + 1];
             cont.State = (byte)CellState.Empty;
             cont.Glyph = '\0';
-            cont.Fade = 0;
+            cont.Brightness = 0;
+            cont.CursorBoost = 0;
         }
     }
 
@@ -1095,13 +1227,16 @@ internal sealed class MatrixEngine
     {
         var minTrail = Math.Max(EngineConstants.MinTrailCells, (int)(_height * EngineConstants.TrailMinHeightFraction));
         var maxTrail = Math.Max(minTrail, (int)(_height * EngineConstants.TrailMaxHeightFraction));
+        var speed = (byte)_rng.Next(EngineConstants.MinSpeed, EngineConstants.MaxSpeed + 1);
 
         _columns[x] = new ColumnState
         {
             Active = true,
             HeadY = -_rng.Next(0, Math.Max(1, _height / 2)),
-            Speed = (byte)_rng.Next(EngineConstants.MinSpeed, EngineConstants.MaxSpeed + 1),
+            Speed = speed,
             TrailLength = _rng.Next(minTrail, maxTrail + 1),
+            TimeOffset = RainBrightness.ColumnTimeOffset(x),
+            SpeedOffset = RainBrightness.SpeedOffsetFromColumnSpeed(speed),
         };
     }
 
@@ -1118,6 +1253,8 @@ internal struct ColumnState
     internal int HeadY;
     internal byte Speed;
     internal int TrailLength;
+    internal float TimeOffset;
+    internal float SpeedOffset;
 }
 
 internal static class TerminalSession

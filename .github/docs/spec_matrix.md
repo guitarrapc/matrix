@@ -4,133 +4,82 @@ Status: **Implemented**
 
 ## Motivation
 
-`matrix` is a terminal CLI that plays a Matrix-inspired digital rain animation for a configurable duration when launched. It is intended as a lightweight visual effect for demos, shell startup flair, or idle terminal ambience — without excessive CPU or memory use.
+`matrix` is a terminal CLI that plays a Matrix-inspired digital rain animation for a configurable duration. It targets demos, shell flair, and idle ambience with low CPU and memory use.
 
-The visual model approximates the *Matrix* film digital rain: vertical columns of falling glyphs, a bright leading character, mixed bright and dim green tones in the trail, and frequent empty (black) cells so the screen is never fully filled.
+The look should evoke the film: vertical falls, a bright leading glyph, green trails fading into black, and plenty of empty space between columns.
 
-Distribution targets **standalone executables per platform** via **Native AOT** from a **single `.cs` source file**, with no runtime dependency on a shared .NET installation.
+Ship as **standalone Native AOT binaries** from a **single `matrix.cs` file**, with no shared .NET runtime dependency.
 
 ---
 
 ## Visual Behavior
 
-### Column rain model
+### Column rain
 
-The animation uses **vertical columns** of falling characters. Each column maintains an independent **stream** with its own speed, trail length, and activity state.
-
-This model was chosen because it matches the film aesthetic, allows sparse black regions between columns, and keeps resource use bounded by updating per column rather than randomizing the entire screen each frame.
-
-### Vertical stream motion
-
-In the *Matrix* film, glyphs in an active column appear to fall **straight downward along a single vertical line** (fixed column **X**). The user should perceive a **contiguous vertical ribbon** moving down, not scattered characters flickering in place within the column.
-
-Normative behavior:
+Each column is an independent **stream** (speed, trail length, active/inactive). Streams fall **straight down** along a fixed column **X** as one **contiguous** vertical segment — no random holes inside an active trail. Black space comes mostly from **inactive columns and gaps**, not from erasing cells mid-trail.
 
 | Requirement | Meaning |
 |---|---|
-| **Fixed column X** | Every glyph in a stream occupies the same terminal column. |
-| **Downward motion** | The stream moves **down as a unit** each frame, at that column’s speed (1–3 cells per frame). |
-| **Vertical contiguity** | While a stream is active on screen, its visible trail is a **single contiguous vertical segment** — no random empty holes inside the segment. |
-| **Leading edge** | The **Head** is at the **bottom** of the segment (the front of the fall); older glyphs sit **above** it. |
-| **Black space** | Most empty (black) area comes from **inactive columns** and **gaps between streams**, not from punching random holes through an active stream. |
-
-Glyph **mutation** (changing a cell to another character from the pool) may still occur while the stream falls; only **position** must stay vertically aligned.
+| Fixed column X | All glyphs in a stream share one terminal column. |
+| Downward motion | The whole segment shifts down each frame (1–2 cells per frame). |
+| Leading edge | The **Head** is at the **bottom** of the segment; older glyphs sit above. |
+| Glyph mutation | Characters may change while falling; position stays aligned. |
 
 ### Display-cell grid
 
-The simulation grid is **1:1 with terminal display cells** (`Console.WindowWidth` × `Console.WindowHeight`), not with Unicode code units.
+The grid matches **terminal display cells** (width × height), not Unicode code units.
 
-| Mode | Stream anchor | Glyph width |
+| Mode | Anchor columns | Glyph width |
 |---|---|---|
-| ascii-matrix / single | Any display column | 1 cell |
-| movie | Even display columns only (`0`, `2`, `4`, …) where a pair fits | 2 cells |
+| ascii-matrix / single | Any | 1 cell |
+| movie | Even columns only (`0`, `2`, `4`, …) | 2 cells (full-width) |
 
-A wide glyph occupies an **anchor cell** (carries state and glyph) and a **Continuation** cell to its right (marks the second display cell). When rendering left-to-right, **Continuation emits no bytes** — not even a space — because the anchor glyph already advanced the terminal cursor by two cells. Emitting a space in the Continuation cell was a source of horizontal drift and crooked vertical lines.
+Wide glyphs use an **anchor** cell plus a **Continuation** cell to the right. Continuation cells emit **nothing** during render (not even a space).
 
-Stream updates shift anchor and Continuation cells **together** as a pair.
+### Color and brightness
 
-### Cell display states
+Color is driven by the Matrix rain (GLSL + palette pass), not by simple distance-from-head shading:
 
-Each terminal display cell is in exactly one of four states:
+- **Brightness** comes from a per-column **wave** (shared pulse, raindrop truncation). It is **not** trail position.
+- **Palette:** four CLI colors (`--bg`, `--dim`, `--bright`, `--head`) define a global brightness→color map.
+- **Cursor highlight:** the Head and the leading edge of a bright raindrop are emphasized (cursor channel).
+- **Dither** on brightness before palette lookup.
 
-| State | Appearance | Role |
-|---|---|---|
-| **Empty** | Background only | Inactive column, or stream not present at this row |
-| **Glyph** | Colored character | Part of an active stream; brightness from **Fade** |
-| **Continuation** | (nothing written) | Second display cell of a wide glyph; render skips it |
+True Color terminals use 24-bit ANSI; others fall back to the nearest 16-color name with a stderr warning.
 
-### Trail brightness (Fade gradient)
+### Presentation
 
-Brightness is **not** a small set of discrete states. Each **Glyph** cell stores **Fade** (0–255): distance from the Head normalized over that stream’s trail length (`0` = Head, `255` = tail tip).
+- ~**14 FPS**; alternate screen; hidden cursor; restore terminal on exit (no farewell message).
+- Recalculate grid on resize when the environment allows.
 
-At render time, Fade maps through **four CLI colors** in three linear segments:
-
-| Fade range (`t`) | Interpolation |
-|---|---|
-| `t ≤ 0.06` | `--head` (bloom) → hot bright |
-| `t ≤ 0.20` | hot bright → boosted `--bright` |
-| `t ≤ 0.85` | `--bright` → `--dim` (long vivid green trail) |
-| `t ≤ 1.00` | `--dim` → black via **hue-preserving scale** (last ~15% only; avoids gray midtones) |
-
-**True Color:** interpolated RGB as 24-bit ANSI. **16-color fallback:** interpolate then map to the nearest named color.
-
-Within an active stream, **Dim → Empty** occurs only when the cell leaves the stream (scrolls off or the stream ends), not randomly mid-trail.
-
-### Frame rate and terminal presentation
-
-- Target frame rate: **~14 FPS**.
-- The animation runs on the **alternate screen buffer** so scrollback history is not polluted.
-- The cursor is hidden during playback and restored on exit.
-- On exit (timeout or user input), the terminal is restored to its pre-animation state with no trailing message.
-- When the terminal is resized during playback, column and row counts are recalculated where the environment allows.
-
-### Animation tuning
+### Tuning (defaults)
 
 | Parameter | Value |
 |---|---|
-| Target FPS | 14 |
-| `--density` | **0.0–1.0**, default **0.55** (see below) |
-| Trail length | Per stream at spawn: **height × 0.15 … height × 0.90** (minimum 4 cells), random |
-| Fall speed | 1–2 cells per frame (random per column); entire stream shifts by this amount |
-| Glyph mutation | ~35% chance per frame per visible cell in stream |
-| Movie density boost | Effective density **× 1.5** (capped at 1.0) to offset even-column spacing |
-
-**Density** scales both initial active columns and spawn rate:
-
-- `activeChance = density × 55%`
-- `spawnChance = density × 6%` per frame among inactive stream columns
+| FPS | 14 |
+| `--density` | 0.0–1.0, default **0.55** |
+| Trail length | height × 0.15 … 0.90 per stream (min 4 cells) |
+| Fall speed | 1–2 cells/frame per column |
+| Glyph mutation | ~35% per frame per visible stream cell |
+| Movie density | effective density × **1.5** (cap 1.0) |
 
 ---
 
 ## Character Modes
 
-Three glyph modes are supported:
-
 | Mode | Invocation | Character set |
 |---|---|---|
-| **ascii-matrix** (default) | No mode flag | Mixed ASCII: `A–Z`, `0–9`, and symbols such as `@#$%^&*()` |
-| **single** | `--char X` | Exactly one user-specified character |
-| **movie** | `--mode movie` | Fixed pool dominated by katakana, plus Latin letters, digits, and a small set of symbols |
+| **ascii-matrix** (default) | (none) | Mixed ASCII letters, digits, symbols |
+| **single** | `--char X` | One user character |
+| **movie** | `--mode movie` | Katakana-centered pool + Latin, digits, symbols |
 
-In all modes, individual cells **randomly change to another character from the active pool** at the configured mutation rate, mimicking the film’s shifting glyphs.
+`--char` and `--mode movie` together are a fatal error. `--char` wins over other mode flags.
 
-### movie mode encoding requirement
-
-**movie** mode requires a **UTF-8 capable terminal**. If UTF-8 output cannot be established at startup, the process exits with an error. There is no fallback to ascii-matrix for movie mode.
-
-The movie character pool includes katakana (清音・濁音・半濁音中心), `A–Z`, `0–9`, and symbols `:・."=*+-<>`. **Active streams use only full-width (two-cell) glyphs** (katakana in practice) on **even display columns**, with the following cell marked **Continuation**, so each column stays vertically aligned in the terminal.
-
-### Mode conflicts
-
-`--char` and `--mode movie` must not be used together; doing so is a fatal error.
-
-When `--char` is present, **single** mode takes precedence regardless of other mode flags.
+**movie** requires UTF-8 output; no ascii-matrix fallback. Active movie streams use **full-width glyphs on even columns** only.
 
 ---
 
 ## Command-Line Interface
-
-### Usage
 
 ```text
 matrix [duration]
@@ -143,42 +92,19 @@ matrix --help
 matrix --version
 ```
 
-### Duration
-
-| Input | Behavior |
+| Duration | Behavior |
 |---|---|
 | Omitted | **5 seconds** |
-| Positive number | Run for that many seconds (positional `[duration]` or `--duration`) |
-| `0` or negative | Run until the user ends the session (see Exit behavior) |
+| Positive | Run that many seconds |
+| `0` or negative | Run until key exit |
 
-Both a trailing positional duration and `--duration` are supported; only one effective duration should be supplied.
-
-### Standard options
-
-| Option | Behavior |
-|---|---|
-| `--density` | Rain density **0.0–1.0** (default **0.55**). Invalid or out-of-range values are errors. |
-| `--help` | Print usage, modes, duration, color options, and examples (English) |
-| `--version` | Print `matrix <version>` (e.g. `matrix 1.0.0`) |
-
-### Messages
-
-All user-facing text (`--help`, errors, warnings) is **English only** in v1.
+User-facing messages are **English only** in v1.
 
 ---
 
-## Color
+## Color Options
 
-### Accepted formats
-
-Colors are specified as either:
-
-- **Hex:** `#RGB` or `#RRGGBB` (`#` required; case-insensitive)
-- **Named 16-color:** `black`, `darkblue`, `darkgreen`, `darkcyan`, `darkred`, `darkmagenta`, `darkyellow`, `gray`, `darkgray`, `blue`, `green`, `cyan`, `red`, `magenta`, `yellow`, `white`
-
-Hex is the primary representation; named colors are accepted so users can specify palette-friendly values directly and so fallback mode has a stable vocabulary.
-
-### Defaults
+**Formats:** `#RGB` / `#RRGGBB`, or standard 16-color names (`black`, `green`, `white`, …).
 
 | Option | Default |
 |---|---|
@@ -187,143 +113,71 @@ Hex is the primary representation; named colors are accepted so users can specif
 | `--bright` | `#30FF58` |
 | `--dim` | `#00AA1C` |
 
-Unspecified color options use these defaults.
-
-### True Color vs 16-color fallback
-
-When the terminal is judged to support **True Color**, hex values are rendered as 24-bit colors. Named colors are mapped to their corresponding RGB values for output.
-
-When True Color is **not** supported:
-
-1. A **warning** is printed to stderr.
-2. Rendering falls back to the **16-color palette**.
-3. Named colors are used as-is.
-4. Hex values are mapped to the **nearest 16-color** equivalent.
-
-The canonical fallback palette for non-True-Color terminals matches the default intent: `black` / `white` / `green` / `darkgreen`.
-
-### True Color detection
-
-True Color support is inferred from environment signals, including:
-
-- `COLORTERM` set to `truecolor` or `24bit`
-- `TERM` containing `truecolor` or `24bit`
-- `WT_SESSION` (Windows Terminal)
-- `TERM_PROGRAM` indicating known True Color terminals (e.g. `vscode`, `Apple_Terminal`, `iTerm.app`)
-
-On Windows, **virtual terminal processing** is enabled at startup in addition to the environment checks.
-
-On Linux and macOS, detection relies on environment signals only; `TERM=xterm-256color` alone does **not** imply True Color (256-color ≠ 24-bit).
-
-Invalid color strings are fatal errors.
+Invalid colors are fatal. True Color is inferred from environment signals (`COLORTERM`, `WT_SESSION`, `TERM_PROGRAM`, etc.); `TERM=xterm-256color` alone does **not** enable 24-bit. Windows enables virtual terminal processing at startup.
 
 ---
 
-## Exit Behavior
+## Exit and Terminal I/O
 
-Playback ends when **either** condition is met first:
+Playback ends on **duration elapsed** or **any keypress** (no Enter). `Ctrl+C` restores the terminal and exits cleanly.
 
-1. The configured duration elapses (finite runs).
-2. The user presses **any key** (see Input requirements).
-
-On exit, the alternate screen is left, the cursor and terminal state are restored, and the process exits with code **0**. No farewell message is printed.
-
-`Ctrl+C` is handled like a normal exit path: restore the terminal, then exit.
-
-### Input requirements
-
-- Key exit must fire on the **first keypress** without requiring **Enter**.
-- Any key (printable, space, arrows, control keys, etc.) ends the session.
-- Key echo must not leave typed characters visible on the animation screen.
-
----
-
-## Terminal and I/O Requirements
-
-### stdout must be a TTY
-
-The animation requires a **TTY on stdout**. If stdout is redirected or piped, the process exits with a non-zero code and an English error message.
-
-`--help` and `--version` work regardless of stdout redirection.
-
-### stdin and key exit
-
-| stdout | stdin | Behavior |
+| stdout | stdin | Result |
 |---|---|---|
-| TTY | TTY | Full behavior: animation + key exit + duration |
-| TTY | not TTY | **Warning** on stderr; animation runs on **duration only** (key exit disabled) |
-| not TTY | any | **Error** (except `--help` / `--version`) |
+| TTY | TTY | Full animation + key exit |
+| TTY | not TTY | Warning; duration-only |
+| not TTY | any | Error (`--help` / `--version` excepted) |
 
-### Future consideration (v2)
+Exit code **0** on normal completion; **1** on parse/validation/TTY/UTF-8/mode errors.
 
-Non-TTY stdout fallback (streaming ANSI text without alternate-screen requirements) is **out of scope for v1** but may be added in v2.
+Non-TTY stdout streaming is **out of scope for v1**.
 
 ---
 
 ## Distribution
 
-### Source and build model
-
-- **Single source file:** `matrix.cs` with file-based project directives (`#:sdk`, `#:property`, …).
-- **Target framework:** `net10.0`
-- **Native AOT**, **self-contained**, **single-file publish**
-- **No external NuGet dependencies** (BCL only)
-- Assembly / executable name: **`matrix`**
-
-Framework-dependent deployment is explicitly **not** used; each published binary is intended to run without a preinstalled shared runtime.
-
-### Multi-platform artifacts
-
-Native AOT produces **one executable per runtime identifier (RID)**. A single binary does not run on all operating systems.
-
-v1 release builds target six RIDs via CI matrix (`fail-fast: false`):
-
-| Runner OS | RID | Artifact name |
-|---|---|---|
-| ubuntu-24.04 | linux-x64 | `matrix-linux-amd64` |
-| ubuntu-24.04-arm | linux-arm64 | `matrix-linux-arm64` |
-| windows-2025 | win-x64 | `matrix-win-amd64` |
-| windows-11-arm | win-arm64 | `matrix-win-arm64` |
-| macos-26 | osx-arm64 | `matrix-osx-arm64` |
-| macos-26-intel | osx-x64 | `matrix-osx-amd64` |
-
-Archives use `.tar.gz` on Unix-like platforms and `.zip` on Windows.
-
----
-
-## Exit Codes
-
-| Outcome | Code |
-|---|---|
-| Normal completion (timeout or key exit) | `0` |
-| Parse / validation error, missing TTY, movie mode UTF-8 failure, mode conflict | non-zero (`1` unless specified otherwise) |
-
----
-
-## Design Rationale Summary
-
-| Decision | Why |
-|---|---|
-| Vertical stream shift + Fade gradient | Film-like straight-line fall with smooth bright-to-dark trails |
-| `--density` + movie boost | Tunable sparsity; movie mode compensates for even-column layout |
-| ascii-matrix default; movie mode optional | Broad terminal compatibility by default; authentic script when UTF-8 is available |
-| True Color hex + named colors + 16-color fallback | Rich defaults on modern terminals; graceful degradation elsewhere |
-| Alternate screen + restore | Preserves shell scrollback and prompt UX |
-| ~14 FPS, slower column shift | Closer to the film’s unhurried fall |
-| Key exit without Enter | Immediate “press any key to dismiss” UX for demos |
-| Native AOT self-contained per RID | Standalone `.exe` / binary with no shared runtime install |
-| TTY required on stdout (v1) | Alternate screen, colors, and keyboard handling assume an interactive terminal |
-| English-only messages | Conventional for cross-platform OSS CLI tools |
+- Single file `matrix.cs`, `net10.0`, Native AOT, self-contained, single-file, BCL only, assembly name `matrix`.
+- CI builds six RIDs: `linux-x64`, `linux-arm64`, `win-x64`, `win-arm64`, `osx-arm64`, `osx-x64` (`.tar.gz` on Unix, `.zip` on Windows).
 
 ---
 
 ## Lessons Learned
 
-- **File-based `#:` project + top-level statements:** a file-scoped `const` or extra `Program` type conflicts with the compiler-generated entry type; keep help text in a separate static class and use `Assembly.GetExecutingAssembly()` for `--version`.
-- **Unix `termios` is not portable as a single blittable struct:** Linux (32-byte `c_cc`, 32-bit flags) and macOS (20-byte `c_cc`, 64-bit flags) need separate layouts and `VMIN`/`VTIME` indices.
-- **True Color detection stays conservative:** `TERM=xterm-256color` alone must not enable 24-bit output; environment signals (`COLORTERM`, `WT_SESSION`, etc.) remain the gate.
-- **Hot-path rendering:** pre-built ANSI byte sequences, `ArrayPool` grids/buffers, and a single `Stream.Write` + `Flush` per frame keep allocations out of the animation loop; palette and glyph pools are initialized once at startup.
-- **Vertical motion must be explicit in the spec:** the film reads as straight-line falls because each stream moves down as one contiguous segment. An early design treated **Dim → Empty** as high per-frame probability anywhere in the column; that produced scattered, flickering cells and did **not** look like Matrix rain. **Black belongs mostly between columns**, not inside active trails. The visual spec was revised; animation now **shifts each column down as a unit** and assigns Bright/Dim by distance from the Head.
-- **Terminal cell width ≠ one code unit in movie mode:** katakana is **full-width (two terminal cells)**; half-width ASCII is one cell. Placing both in the same logical column breaks vertical alignment, and adjacent streams collide when a wide glyph spans into the next column. Movie mode uses **even column indices**, **full-width glyphs only**, and a **Continuation** display cell whose render output is empty. Earlier fixes that cleared odd columns but still **printed a space** there caused cursor drift and crooked lines; the display-cell grid removes that spurious output.
-- **Discrete Head/Bright/Dim states were too coarse for the film look:** a **Fade** byte plus piecewise RGB interpolation across `--head` / `--bright` / `--dim` / `--bg` better matches gradual trail falloff. Sixteen-color terminals use the same Fade curve with nearest-color quantization.
-- **Tail fade needs a long vivid section:** bright-to-dim runs over ~85% of the trail; only the **last ~15%** scales toward black. Mid-trail darkening used a separate “dark green” stop that read as **gray** on some displays — **hue-preserving RGB scale** (`color × (1−u)`) replaces lerping through muddy midtones.
+Decisions and pitfalls discovered during implementation. **Do not revert these without re-reading this section.**
+
+### Vertical motion (column shift)
+
+- **Tried:** random Dim→Empty inside active columns.
+- **Result:** scattered flicker, not film-like rain.
+- **Decision:** shift each stream down as a unit; clear cells only when they leave the segment or the stream ends. Black belongs **between** columns, not inside trails.
+
+### movie mode layout
+
+- **Tried:** mixed half-width and full-width glyphs in the same logical column.
+- **Result:** broken vertical alignment and column collisions.
+- **Decision:** even anchor columns, full-width glyphs only, Continuation cell for the second display cell.
+- **Pitfall:** emitting a **space** on Continuation cells caused cursor drift and crooked lines — Continuation must write **zero bytes**.
+
+### Color model evolution
+
+| Stage | Approach | Outcome |
+|---|---|---|
+| 1 | Discrete Head / Bright / Dim states | Too coarse |
+| 2 | Fade byte = distance from Head, piecewise RGB | Better trails, still not Matrix-like |
+| 3 | **256-entry palette LUT** + **wave brightness** + dither + cursor boost | Current model |
+
+Brightness is **wave-driven**, not trail-distance-driven. The four CLI colors define the palette; do not replace with ad-hoc per-cell RGB lerps.
+
+### Wave port — regressions that produced all-white output
+
+These are behavioral constraints, easy to get wrong in a top-origin terminal:
+
+1. **`raindropLength` is a small scale factor (~0.75), not trail cell count.** Using trail length as the divisor flattened brightness across each column → everything mapped to the brightest LUT entries.
+2. **Terminal row 0 is the top; glyph Y is 0 at the bottom.** Without flipping Y, the wave inverts, cursor detection (`brightness` vs cell below) fires on most cells, and additive white head boost washes the screen to pure white.
+3. **Cursor boost is additive and strong.** It must stay sparse (Head + raindrop leading edge only). Broad cursor flags + white `--head` silently negate the green palette.
+
+### Runtime and build
+
+- File-based `#:` project + top-level statements: avoid file-scoped `const` and extra `Program` types; use a static help class and `Assembly.GetExecutingAssembly()` for `--version`.
+- Unix raw input: Linux and macOS need **separate** `termios` layouts (`c_cc` size and flag width differ).
+- True Color gate stays **conservative** — 256-color `TERM` ≠ 24-bit.
+- Hot path: pre-built ANSI prefixes, `ArrayPool` for grid/buffer, one `Stream.Write` + `Flush` per frame; palette and glyph pools built once at startup.
