@@ -45,9 +45,6 @@ matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
 # Fallback order is hex true color, nearest 16-color palette, then colorless ASCII.
 matrix --bg "#080300" --head "#FFF3D0" --bright "#FF9F1A" --dim "#5A2100"
 
-# Coordinate software head bloom with a terminal GPU shader. Default is auto.
-matrix --shader-bloom <auto|off|on>
-
 # Change frame rate. Higher FPS also makes rain move faster in real time. Default is 14.
 matrix --fps 10
 
@@ -63,7 +60,7 @@ matrix [--duration <seconds>] [--mode <ascii|movie>] [--char <character>]
        [--density <0.0-1.0>] [--fps <1-60>]
        [--pattern <classic|resurrections|operator|twilight|rain|rainbow>]
        [--bg <color>] [--head <color>] [--bright <color>] [--dim <color>]
-       [--cursor-intensity <0.5-5.0>] [--shader-bloom <auto|off|on>]
+       [--cursor-intensity <0.5-5.0>]
        [--help] [--version]
 ```
 
@@ -71,7 +68,7 @@ For exact option behavior, defaults, validation ranges, terminal I/O behavior, a
 
 ### Shaders
 
-If your terminal supports pixel shaders, `matrix` can reduce its software head bloom so a terminal GPU shader can provide the glow.
+If your terminal supports pixel shaders, a terminal GPU shader can add glow or post-processing to the rendered rain. Bloom strength is controlled in the shader file.
 
 Windows Terminal pixel shader examples live in `shaders/windows-terminal`:
 

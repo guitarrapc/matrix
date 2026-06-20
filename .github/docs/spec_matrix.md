@@ -109,7 +109,6 @@ matrix --fps <1-60>
 matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
 matrix --bg <color> --head <color> --bright <color> --dim <color>
 matrix --cursor-intensity <0.5-5.0>
-matrix --shader-bloom <auto|on|off>
 matrix --help
 matrix --version
 ```
@@ -137,7 +136,6 @@ User-facing messages are **English only** in v1.
 | `--bright` | `#30FF58` |
 | `--dim` | `#053D16` |
 | `--cursor-intensity` | **2.5** |
-| `--shader-bloom` | `auto` |
 
 Color patterns:
 
@@ -152,11 +150,11 @@ Color patterns:
 
 For non-rainbow patterns, `--bg`, `--head`, `--bright`, and `--dim` override preset colors. For `rainbow`, only `--bg` overrides the preset; rain colors come from the band palette.
 
-`--shader-bloom auto` treats Windows Terminal as shader-capable. When shader bloom is active and `--cursor-intensity` is not explicit, software head bloom is reduced to **1.0** so terminal GPU bloom can provide the glow. The CLI prints startup guidance because Windows Terminal shaders must still be configured and toggled by the user.
+Terminal pixel shaders are configured outside the CLI. `matrix` does not detect shader state or change its software head bloom for shaders; bloom strength belongs in the shader file.
 
 True Color detection is conservative: `COLORTERM=truecolor|24bit`, `TERM` containing `truecolor` or `24bit`, Windows Terminal, VS Code, Apple Terminal, and iTerm are accepted. `TERM=xterm-256color` alone does **not** imply 24-bit color. Windows enables virtual terminal processing at startup.
 
-Invalid colors, unknown patterns, and invalid shader-bloom values are fatal parse errors.
+Invalid colors and unknown patterns are fatal parse errors. Removed or unknown options are also fatal parse errors.
 
 ---
 

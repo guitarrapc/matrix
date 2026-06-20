@@ -45,9 +45,6 @@ matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
 # フォールバック順は hex True Color、近似16色パレット、色なし ASCII です。
 matrix --bg "#080300" --head "#FFF3D0" --bright "#FF9F1A" --dim "#5A2100"
 
-# ソフトウェア側の head bloom とターミナルの GPU シェーダーを調整します。デフォルトは auto です。
-matrix --shader-bloom <auto|off|on>
-
 # フレームレートを変更します。FPSを上げると、実時間での雨の動きも速くなります。デフォルトは14です。
 matrix --fps 10
 
@@ -63,7 +60,7 @@ matrix [--duration <seconds>] [--mode <ascii|movie>] [--char <character>]
        [--density <0.0-1.0>] [--fps <1-60>]
        [--pattern <classic|resurrections|operator|twilight|rain|rainbow>]
        [--bg <color>] [--head <color>] [--bright <color>] [--dim <color>]
-       [--cursor-intensity <0.5-5.0>] [--shader-bloom <auto|off|on>]
+       [--cursor-intensity <0.5-5.0>]
        [--help] [--version]
 ```
 
@@ -71,7 +68,7 @@ matrix [--duration <seconds>] [--mode <ascii|movie>] [--char <character>]
 
 ### Shaders
 
-ピクセルシェーダーに対応したターミナルでは、`matrix` がソフトウェア側の head bloom を抑え、ターミナルの GPU シェーダーで発光を足せます。
+ピクセルシェーダーに対応したターミナルでは、GPU シェーダーで描画済みの rain に発光やポストプロセスを追加できます。Bloom の強さは shader ファイル側で調整します。
 
 Windows Terminal 向けのピクセルシェーダー例は `shaders/windows-terminal` にあります。
 
