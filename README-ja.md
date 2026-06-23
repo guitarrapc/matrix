@@ -8,11 +8,11 @@
 
 Windows、Linux、macOS で単体バイナリとして動きます。ASCII の雨、映画風の全角グリフ、True Color テーマ、Windows Terminal のピクセルシェーダーに対応しています。
 
-![](./images/classic_shader.png)
+![](./assets/scenario.svg)
 
 | Shader | Shaderless (True-color) | ASCII |
 | --- | --- | --- |
-| ![](./images/classic_shader.png) | ![](./images/classic_shaderless.png) | ![](./images/classic_ascii.png) |
+| ![](./assets/classic_shader.png) | ![](./assets/classic_shaderless.png) | ![](./assets/classic_ascii.png) |
 
 ## Quick start
 

@@ -8,11 +8,11 @@ Terminal-based green code rain. [Matrix](https://en.wikipedia.org/wiki/Digital_r
 
 It runs on Windows, Linux, and macOS as a standalone binary. It supports ASCII rain, full-width movie-style glyphs, true-color themes, and optional Windows Terminal pixel shaders.
 
-![](./images/classic_shader.png)
+![](./assets/scenario.svg)
 
 | Shader | Shaderless (True-color) | ASCII |
 | --- | --- | --- |
-| ![](./images/classic_shader.png) | ![](./images/classic_shaderless.png) | ![](./images/classic_ascii.png) |
+| ![](./assets/classic_shader.png) | ![](./assets/classic_shaderless.png) | ![](./assets/classic_ascii.png) |
 
 ## Quick start
 

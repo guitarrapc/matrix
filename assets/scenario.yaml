@@ -1,0 +1,18 @@
+﻿# scenetake starter scenario. Edit the values below and add commands under steps.
+title: "matrix"
+width: 60
+height: 16
+shell: bash
+
+settings:
+  prompt: "$ "
+  typing-speed: 0.2
+  typing-jitter: 0.015
+  pre-delay: 0.5
+  post-delay: 0.1
+  execution-duration: 0.05
+  stderr-color: red
+
+steps:
+  - run: matrix 3
+    pty: true
