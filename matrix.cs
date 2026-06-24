@@ -1423,9 +1423,15 @@ internal sealed class MatrixEngine : IDisposable
         var deficit = targetActive - activeCount;
         var headroomSpawn = Math.Min(100, (int)Math.Round(_baseSpawnChancePercent * EngineConstants.DensitySpawnHeadroom));
 
-        if (deficit <= 0)
+        if (deficit < 0)
         {
-            _spawnChancePercent = headroomSpawn;
+            _spawnChancePercent = 0;
+            return;
+        }
+
+        if (deficit == 0)
+        {
+            _spawnChancePercent = _baseSpawnChancePercent;
             return;
         }
 
