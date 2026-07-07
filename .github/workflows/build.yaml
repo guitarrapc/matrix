@@ -95,3 +95,11 @@ jobs:
             printf '%s\n' "$redirected_output" >&2
             exit 1
           fi
+
+  build-complete:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Build complete
+        run: echo "Build complete for all platforms."
