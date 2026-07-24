@@ -99,6 +99,7 @@ jobs:
   build-complete:
     needs: publish
     runs-on: ubuntu-24.04
+    permissions: {}
     timeout-minutes: 3
     steps:
       - name: Build complete
