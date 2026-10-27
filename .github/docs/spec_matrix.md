@@ -207,6 +207,7 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 - **Symptom:** a full-screen 4K Windows Terminal (156 x 133 cells, default Cascadia Mono) stuttered in movie mode while ascii and rainbow stayed smooth. The program side was not the bottleneck: each frame was built and written in about 1 ms.
 - **Cause:** typical terminal fonts lack katakana, so movie glyphs come from a fallback font. Windows Terminal maps fonts and shapes text for each run of characters that share a font. ASCII spaces between glyphs split every row into dozens of short runs, alternating between the primary font and the fallback font. The terminal render thread used about 14x the CPU of ascii mode. At 30 FPS it presented only 208-232 of about 253 frames.
 - **Decision:** render empty movie pairs as U+3000. Japanese fallback fonts cover it, so a row stays in one fallback run. The render thread used about 30% less CPU, and at 30 FPS the present rate matched ascii (252 frames, p95 35 ms).
+- **Tried:** switching the terminal font to one that contains katakana (BIZ UDGothic, Meiryo). In an isolated DirectWrite benchmark this cut shaping cost, but in Windows Terminal the render thread CPU did not change, with or without U+3000. Changing the font is not a fix.
 - **Pitfall:** do not reintroduce ASCII spaces inside movie rows. Each fallback glyph still costs more to shape than an ASCII glyph, so movie mode has less headroom than ascii.
 
 ### Density and stutter
