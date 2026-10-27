@@ -1103,7 +1103,10 @@ internal sealed class AnsiPalette
         return count;
     }
 
-    internal void WriteFrame(Stream stdout, ReadOnlySpan<Cell> grid, int width, int height, byte[] buffer, ulong frameNumber)
+    /// <summary>U+3000 IDEOGRAPHIC SPACE: blank, two display cells wide.</summary>
+    private static ReadOnlySpan<byte> IdeographicSpace => "　"u8;
+
+    internal void WriteFrame(Stream stdout, ReadOnlySpan<Cell> grid, int width, int height, bool wideColumns, byte[] buffer, ulong frameNumber)
     {
         var pos = 0;
         AppendBytes(buffer, ref pos, _syncStart);
@@ -1130,6 +1133,16 @@ internal sealed class AnsiPalette
 
                 if (cell.State == (byte)CellState.Empty)
                 {
+                    // Movie glyphs come from a fallback font. ASCII spaces between them split each row into
+                    // many font runs, and terminals such as Windows Terminal re-run font fallback and shaping
+                    // per run. A full-width ideographic space keeps the whole row in one run.
+                    if (wideColumns && (x & 1) == 0 && x + 1 < width && grid[row + x + 1].State == (byte)CellState.Empty)
+                    {
+                        AppendBytes(buffer, ref pos, IdeographicSpace);
+                        x++;
+                        continue;
+                    }
+
                     AppendBytes(buffer, ref pos, _space);
                     continue;
                 }
@@ -1531,7 +1544,7 @@ internal sealed class MatrixEngine : IDisposable
             _renderBuffer = ArrayPool<byte>.Shared.Rent(needed);
         }
 
-        _palette.WriteFrame(stdout, _grid, _width, _height, _renderBuffer, _frameNumber);
+        _palette.WriteFrame(stdout, _grid, _width, _height, _wideColumns, _renderBuffer, _frameNumber);
     }
 
     private void Resize(int? widthOverride = null, int? heightOverride = null)
