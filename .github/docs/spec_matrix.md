@@ -93,9 +93,10 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 | Pool | Contents | Share |
 |---|---|---|
 | Katakana | Clear, voiced, semi-voiced katakana | **80%** |
-| Digits | Full-width `0`-`9` | **13.6%** |
-| Kanji | `日` `三` `二` `一` `十` | **3.4%** |
-| Symbols | `:` middle dot, period, math/comparison/line symbols, dakuten, handakuten | **3%** |
+| Marks | `〇` `ー` `々` `〆` `ヶ` `ヵ` `ヿ` `ヽ` `ヾ` `〃` | **17%** |
+| Symbols | `・` `゠` `〈` `〉` `゛` `゜` `〓` | **3%** |
+
+Every movie glyph stays within **U+3000-U+30FF** (see Lessons Learned: movie mode font fallback stutter).
 
 ---
 
@@ -200,15 +201,17 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 - **Result:** broken vertical alignment and column collisions.
 - **Decision:** even anchor columns, full-width glyphs only, Continuation cell for the second display cell.
 - **Pitfall:** emitting a space on Continuation cells caused cursor drift and crooked lines. Continuation must write zero bytes.
-- **Glyph mix:** katakana-only was too plain vs the film. Full-width digits, five kanji, and a small symbol bucket keep the mix varied while remaining mostly katakana.
+- **Glyph mix:** katakana-only was too plain vs the film. Full-width digits, five kanji, and full-width symbols were added first, but they made wide screens stutter (see below). Marks and symbols from U+3000-U+30FF now keep the mix varied: `〇` stands in for zero, `ー` for `一`, `゠` for `=`, and `〈` `〉` for `<` `>`.
 
 ### movie mode font fallback stutter
 
-- **Symptom:** a full-screen 4K Windows Terminal (156 x 133 cells, default Cascadia Mono) stuttered in movie mode while ascii and rainbow stayed smooth. The program side was not the bottleneck: each frame was built and written in about 1 ms.
+- **Symptom:** a full-screen Windows Terminal on a portrait 1440 x 2560 display (156 x 133 cells, default Cascadia Mono) stuttered in movie mode while ascii and rainbow stayed smooth. The program side was not the bottleneck: each frame was built and written in about 1 ms.
 - **Cause:** typical terminal fonts lack katakana, so movie glyphs come from a fallback font. Windows Terminal maps fonts and shapes text for each run of characters that share a font. ASCII spaces between glyphs split every row into dozens of short runs, alternating between the primary font and the fallback font. The terminal render thread used about 14x the CPU of ascii mode. At 30 FPS it presented only 208-232 of about 253 frames.
 - **Decision:** render empty movie pairs as U+3000. Japanese fallback fonts cover it, so a row stays in one fallback run. The render thread used about 30% less CPU, and at 30 FPS the present rate matched ascii (252 frames, p95 35 ms).
 - **Tried:** switching the terminal font to one that contains katakana (BIZ UDGothic, Meiryo). In an isolated DirectWrite benchmark this cut shaping cost, but in Windows Terminal the render thread CPU did not change, with or without U+3000. Changing the font is not a fix.
-- **Pitfall:** do not reintroduce ASCII spaces inside movie rows. Each fallback glyph still costs more to shape than an ASCII glyph, so movie mode has less headroom than ascii.
+- **Wide screens:** on a full-screen 5120 x 2160 display (565 x 112 cells), the render thread stays saturated in movie mode with or without U+3000, and presents only about 8-12 FPS at both 14 and 30 FPS. ascii at the same size uses about 12%. A sampling profile of the render thread shows about 80% of its time in `IDWriteFontFallback::MapCharacters`, and only about 8% in shaping and under 1% in drawing. System font fallback ends a mapped run at every switch between Unicode ranges, even when both sides map to the same font. Only U+3000-U+30FF (CJK symbols, hiragana, katakana) stays in one run with katakana; full-width digits, kanji, and full-width symbols each start a new run. With U+3000 and a katakana-only pool, the same screen presents 28.8 FPS at about 50% CPU.
+- **Decision:** limit the movie pool to U+3000-U+30FF (katakana, marks, symbols). On the 5120 x 2160 screen at 30 FPS the render thread dropped from 91-94% to 30-36% CPU, and the present rate rose from about 11 FPS to the same rate as ascii.
+- **Pitfall:** do not reintroduce ASCII spaces inside movie rows, or glyphs outside U+3000-U+30FF. Look-alikes in other blocks (Suzhou numerals `〡`-`〩`, Kangxi radicals, enclosed CJK) also split runs or fall back to other fonts. Each fallback glyph still costs more to shape than an ASCII glyph, so movie mode has less headroom than ascii.
 
 ### Density and stutter
 

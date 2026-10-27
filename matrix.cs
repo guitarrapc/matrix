@@ -1337,20 +1337,20 @@ internal sealed class GlyphPool
         if (roll < 800)
             return MovieKatakanaChars[rng.Next(MovieKatakanaChars.Length)];
         if (roll < 970)
-            return rng.Next(100) < 80
-                ? MovieDigitChars[rng.Next(MovieDigitChars.Length)]
-                : MovieKanjiChars[rng.Next(MovieKanjiChars.Length)];
+            return MovieMarkChars[rng.Next(MovieMarkChars.Length)];
         return MovieSymbolChars[rng.Next(MovieSymbolChars.Length)];
     }
 
     private const string AsciiMatrixChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@#$%^&*()";
     // Movie mode: full-width (two display cells) only — mixed widths break vertical alignment.
+    // Every movie glyph must stay within U+3000-U+30FF. Font fallback in terminals such as Windows Terminal
+    // starts a new run at each switch to another Unicode range (full-width digits, kanji, full-width symbols),
+    // and each run costs a full fallback lookup, so mixed rows stutter on wide screens.
     private const string MovieKatakanaChars =
         "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン" +
         "ガギグゲゴザジズゼゾダヂヅデドバビブベボパピプペポヴヰヱ";
-    private const string MovieDigitChars = "０１２３４５６７８９";
-    private const string MovieKanjiChars = "日三二一十";
-    private const string MovieSymbolChars = "：・．＝＋－＜＞｜゛゜";
+    private const string MovieMarkChars = "〇ー々〆ヶヵヿヽヾ〃";
+    private const string MovieSymbolChars = "・゠〈〉゛゜〓";
 }
 
 internal sealed class MatrixEngine : IDisposable
@@ -2021,7 +2021,7 @@ Modes:
   (default)   ascii-matrix character pool
   --mode ascii  same as default
   --char X    single-character mode
-  --mode movie  full-width katakana-heavy pool with digits, kanji, symbols (UTF-8 required)
+  --mode movie  full-width katakana-heavy pool with Japanese marks and symbols (UTF-8 required)
 
 Density:
   --density     Rain density from 0.0 (sparse) to 1.0 (dense).
