@@ -217,7 +217,14 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 
 - Fixed per-frame spawn could not maintain density across variable stream lifetimes.
 - Adaptive spawn and trail-length boost maintain target coverage, but overly synchronized births produce cohorts that die together.
-- VS Code integrated terminal showed periodic global lag when frame size spiked. The durable constraints are: stagger initial heads, cap births per frame, allow sparse same-column recycling, deduplicate SGR, use row positioning plus clear-to-EOL, wrap frames in synchronized output, and sleep based on actual render time.
+- VS Code integrated terminal showed periodic global lag when frame size spiked. The durable constraints are: stagger initial heads, cap births per frame, allow sparse same-column recycling, deduplicate SGR, use row positioning plus clear-to-EOL, wrap frames in synchronized output, and wait until each frame's scheduled time.
+
+### Frame pacing
+
+- **Symptom:** on Windows, `--fps 30` presented about 21 FPS in every mode, and the default 14 FPS ran at about 12.5 FPS. Each frame took about 3 ms to build, but the app's frame interval averaged 46.8 ms.
+- **Cause:** `Thread.Sleep` rounds up to the 15.6 ms system timer tick, so a 30 ms sleep became 46.8 ms. A system-wide 1 ms timer requested by another process no longer shortens this process's sleeps (Windows 10 2004 and later). Sleeping "frame time minus render time" also let rounding errors add up across frames.
+- **Decision:** wait until a fixed schedule of frame times, and on Windows wait on a high-resolution waitable timer (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`, Windows 10 1803 and later). This is an OS wait, not a spin, and it does not raise the system-wide timer rate. Falling more than one frame behind restarts the schedule instead of rendering catch-up bursts. If the timer cannot be created, waits fall back to `Thread.Sleep`. Linux and macOS sleeps are already precise.
+- **Result:** on a full-screen 5120 x 2160 Windows Terminal, ascii and movie present exactly 30.0 FPS at `--fps 30` (p95 34 ms) and 14.0 FPS at the default. ascii reaches 60.0 FPS at `--fps 60`; movie reaches about 56 FPS there, limited by the terminal. Per-frame app CPU did not change, so the wait does not spin.
 
 ### Color model
 

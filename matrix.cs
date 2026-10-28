@@ -79,7 +79,7 @@ catch (InvalidOperationException ex)
 
 var palette = AnsiPalette.Create(options.Colors, colorMode, cursorIntensity);
 using var engine = new MatrixEngine(pool, palette, options.Density, options.Fps);
-var frameDelayMs = 1000.0 / options.Fps;
+using var pacer = new FramePacer(options.Fps);
 
 var restore = TerminalSession.Enter(keyExitEnabled);
 var exitRequested = false;
@@ -108,11 +108,8 @@ try
             break;
 
         engine.Tick();
-        var frameStart = Stopwatch.GetTimestamp();
         engine.Render(stdout);
-        var frameMs = (Stopwatch.GetTimestamp() - frameStart) * 1000.0 / Stopwatch.Frequency;
-        var sleepMs = Math.Max(0, (int)Math.Round(frameDelayMs - frameMs));
-        Thread.Sleep(sleepMs);
+        pacer.WaitNextFrame();
     }
 }
 finally
@@ -800,6 +797,79 @@ internal static class TerminalCapabilities
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+}
+
+/// <summary>
+/// Paces frames against fixed scheduled times so wait errors do not add up across frames.
+/// On Windows, Thread.Sleep rounds up to the 15.6 ms system tick (30 FPS became about 21 FPS),
+/// so waits use a high-resolution waitable timer. Other platforms already sleep precisely.
+/// </summary>
+internal sealed class FramePacer : IDisposable
+{
+    private const uint CreateWaitableTimerHighResolution = 0x00000002;
+    private const uint TimerAllAccess = 0x001F0003;
+    private const uint Infinite = 0xFFFFFFFF;
+
+    private readonly long _frameTicks;
+    private readonly IntPtr _timer;
+    private long _nextFrame;
+
+    internal FramePacer(int fps)
+    {
+        _frameTicks = Stopwatch.Frequency / fps;
+        _nextFrame = Stopwatch.GetTimestamp() + _frameTicks;
+
+        // Requires Windows 10 1803 or later; on failure the handle is zero and waits fall back to Thread.Sleep.
+        if (OperatingSystem.IsWindows())
+            _timer = CreateWaitableTimerExW(IntPtr.Zero, IntPtr.Zero, CreateWaitableTimerHighResolution, TimerAllAccess);
+    }
+
+    internal void WaitNextFrame()
+    {
+        var remaining = _nextFrame - Stopwatch.GetTimestamp();
+        if (remaining > 0)
+            Wait(remaining);
+
+        // A frame that runs late is caught up on the next one. After falling more than a whole frame
+        // behind, restart the schedule instead of rendering a burst of catch-up frames.
+        _nextFrame = remaining < -_frameTicks
+            ? Stopwatch.GetTimestamp() + _frameTicks
+            : _nextFrame + _frameTicks;
+    }
+
+    private void Wait(long stopwatchTicks)
+    {
+        if (_timer != IntPtr.Zero)
+        {
+            // Negative due time is relative, in 100 ns units.
+            var dueTime = -(long)(stopwatchTicks * (10_000_000.0 / Stopwatch.Frequency));
+            if (dueTime < 0 && SetWaitableTimer(_timer, ref dueTime, 0, IntPtr.Zero, IntPtr.Zero, false))
+            {
+                WaitForSingleObject(_timer, Infinite);
+                return;
+            }
+        }
+
+        Thread.Sleep((int)(stopwatchTicks * 1000 / Stopwatch.Frequency));
+    }
+
+    public void Dispose()
+    {
+        if (_timer != IntPtr.Zero)
+            CloseHandle(_timer);
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateWaitableTimerExW(IntPtr lpTimerAttributes, IntPtr lpTimerName, uint dwFlags, uint dwDesiredAccess);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetWaitableTimer(IntPtr hTimer, ref long lpDueTime, int lPeriod, IntPtr pfnCompletionRoutine, IntPtr lpArgToCompletionRoutine, bool fResume);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
 }
 
 internal static class RainBrightness
