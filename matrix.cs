@@ -2455,9 +2455,10 @@ Modes:
                 font check (UTF-8 required)
 
 Density:
-  --density     Rain density from 0.0 (sparse) to 1.0 (dense).
-                Default 0.55 (ascii-matrix / single / movie with soft font).
-                Default 0.7 (movie with katakana, kana), with a 1.5x effective boost (capped at 1.0).
+  --density     Rain density from 0.0 (sparse) to 1.0 (dense). Default 0.55.
+                Katakana glyphs (--mode kana, or --mode movie when it falls
+                back) fill only every other column, so their density is
+                multiplied by 1.5 (capped at 1.0) and the default is 0.7.
 
 Timing:
   --fps         Frames per second (1-60). Default 14.
