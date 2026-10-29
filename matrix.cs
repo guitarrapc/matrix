@@ -1237,6 +1237,13 @@ internal sealed class AnsiPalette
     private readonly BandLayout _bandLayout;
     // Brightness multiplier per frame for one heartbeat, or null when the pattern does not pulse.
     private readonly double[]? _pulseCurve;
+    // Most bytes one cell can write: a foreground sequence plus a glyph. Blanks and wide-glyph pairs write less.
+    private readonly int _maxCellBytes;
+
+    // "\e[" + up to 10 digits + ";1H": the cursor move written before every row after the first.
+    private const int MaxCupBytes = 15;
+    // A char is at most 3 bytes in UTF-8.
+    private const int MaxGlyphBytes = 3;
 
     // One heartbeat every 20 frames, about 1.4 seconds (a slow ~42 bpm) at the default 14 fps.
     private const int PulseFrames = 20;
@@ -1297,6 +1304,23 @@ internal sealed class AnsiPalette
         _colorMode = colorMode;
         _cursorAddend = cursorAddend;
         _bandCursorAddends = bandCursorAddends;
+
+        // Measure the longest foreground sequence with the same writers WriteFrame uses:
+        // "\e[38;2;255;255;255m" for true color, "\e[97m" for 16 colors (every 16-color code has two digits).
+        Span<byte> scratch = stackalloc byte[32];
+        var maxFgBytes = 0;
+        if (colorMode == TerminalColorMode.TrueColor)
+            WriteTrueColorSequence(scratch, isBackground: false, new Rgb(255, 255, 255), out maxFgBytes);
+        else if (colorMode == TerminalColorMode.Ansi16)
+            WriteAnsi16Sequence(scratch, Ansi16FgCode(ConsoleColor16.White), out maxFgBytes);
+        _maxCellBytes = maxFgBytes + MaxGlyphBytes;
+    }
+
+    /// <summary>Upper bound on the bytes <see cref="WriteFrame"/> writes for a width x height grid.</summary>
+    internal int MaxFrameBytes(int width, int height)
+    {
+        var rowBytes = MaxCupBytes + _bgRowPrefix.Length + _rowFgReset.Length + _clearEol.Length + width * _maxCellBytes;
+        return _syncStart.Length + _home.Length + _syncEnd.Length + height * rowBytes;
     }
 
     internal static AnsiPalette Create(ColorOptions colors, TerminalColorMode colorMode, double cursorIntensity)
@@ -1944,7 +1968,7 @@ internal sealed class MatrixEngine : IDisposable
 
     internal void Render(Stream stdout)
     {
-        var needed = _width * _height * 72 + _height * 24 + 96;
+        var needed = _palette.MaxFrameBytes(_width, _height);
         if (_renderBuffer.Length < needed)
         {
             if (_renderBuffer.Length > 0)
