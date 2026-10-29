@@ -49,11 +49,31 @@ if (Console.IsOutputRedirected)
 var colorMode = TerminalCapabilities.ResolveColorMode();
 if (colorMode == TerminalColorMode.Ansi16)
 {
-    Console.Error.WriteLine("warning: true color not supported; falling back to 16-color palette");
+    Console.Error.WriteLine("warning: true color not supported. falling back to 16-color palette");
 }
 else if (colorMode == TerminalColorMode.None)
 {
-    Console.Error.WriteLine("warning: ANSI color not supported; falling back to colorless ASCII output");
+    Console.Error.WriteLine("warning: ANSI color not supported. falling back to colorless ASCII output");
+}
+
+// Movie mode draws the film glyphs with a soft font when the terminal confirms support,
+// and otherwise falls back to full-width katakana with a warning. --mode kana skips the check.
+var glyphMode = options.Mode;
+var density = options.Density;
+if (glyphMode == GlyphMode.Movie && options.ProbeSoftFont)
+{
+    if (TerminalCapabilities.CanUseSoftFont(colorMode, out var fallbackReason))
+    {
+        glyphMode = GlyphMode.MovieSoftFont;
+        if (!options.DensityExplicit)
+            density = EngineConstants.DefaultDensity;
+    }
+    else
+    {
+        Console.Error.Write("warning: ");
+        Console.Error.Write(fallbackReason);
+        Console.Error.WriteLine(". falling back to katakana glyphs (use --mode kana to skip this check)");
+    }
 }
 
 var cursorIntensity = options.CursorIntensity;
@@ -61,13 +81,13 @@ var cursorIntensity = options.CursorIntensity;
 var keyExitEnabled = !Console.IsInputRedirected;
 if (!keyExitEnabled)
 {
-    Console.Error.WriteLine("warning: stdin is not a tty; key exit disabled, using duration only");
+    Console.Error.WriteLine("warning: stdin is not a tty. key exit disabled, using duration only");
 }
 
 GlyphPool pool;
 try
 {
-    pool = GlyphPool.Create(options.Mode, options.SingleChar);
+    pool = GlyphPool.Create(glyphMode, options.SingleChar);
 }
 catch (InvalidOperationException ex)
 {
@@ -78,10 +98,10 @@ catch (InvalidOperationException ex)
 }
 
 var palette = AnsiPalette.Create(options.Colors, colorMode, cursorIntensity);
-using var engine = new MatrixEngine(pool, palette, options.Density, options.Fps);
+using var engine = new MatrixEngine(pool, palette, density, options.Fps);
 using var pacer = new FramePacer(options.Fps);
 
-var restore = TerminalSession.Enter(keyExitEnabled);
+var restore = TerminalSession.Enter(keyExitEnabled, softFont: glyphMode == GlyphMode.MovieSoftFont);
 var exitRequested = false;
 
 Console.CancelKeyPress += (_, e) =>
@@ -145,6 +165,8 @@ internal enum GlyphMode : byte
     AsciiMatrix = 0,
     Single = 1,
     Movie = 2,
+    /// <summary>Movie mode drawn with the soft font, chosen at startup, not a CLI value.</summary>
+    MovieSoftFont = 3,
 }
 
 internal enum CellState : byte
@@ -165,7 +187,6 @@ internal static class EngineConstants
     internal const double DefaultDensity = 0.55;
     internal const double DefaultMovieDensity = 0.7;
     internal const int DensityActiveBasePercent = 90;
-    internal const double MovieDensityBoost = 1.5;
     /// <summary>Average cells a stream travels before deactivating ≈ factor × height (see spawn equilibrium).</summary>
     internal const double StreamLifetimeHeightFactor = 1.15;
     internal const double AvgFallSpeedCells = (MinSpeed + MaxSpeed) / 2.0;
@@ -186,7 +207,7 @@ internal static class EngineConstants
     internal const int LutDimIndex = 64;
     internal const int LutBrightIndex = 191;
     internal const double LutBrightScale = 1.18;
-    /// <summary>&lt; 1 lifts mid-trail vs tip; tip still reaches 0.</summary>
+    /// <summary>&lt; 1 lifts mid-trail vs tip, tip still reaches 0.</summary>
     internal const double TrailEnvelopeGamma = 0.58;
     /// <summary>Protect the first trail cells from the rain wave starting at a dark phase.</summary>
     internal const int NearHeadBrightnessFloorCells = 5;
@@ -276,6 +297,8 @@ internal enum ColorPattern
 internal sealed class CliOptions
 {
     internal GlyphMode Mode { get; private init; } = GlyphMode.AsciiMatrix;
+    /// <summary>True for --mode movie (try the soft font); false for --mode kana (katakana only).</summary>
+    internal bool ProbeSoftFont { get; private init; }
     internal char SingleChar { get; private init; } = '0';
     internal double DurationSeconds { get; private init; } = 5;
     internal bool ShowHelp { get; private init; }
@@ -283,13 +306,17 @@ internal sealed class CliOptions
     internal string? ErrorMessage { get; private init; }
     internal ColorOptions Colors { get; private init; } = ColorOptions.Default;
     internal double Density { get; private init; } = EngineConstants.DefaultDensity;
+    /// <summary>True when --density was given; movie mode with the soft font replaces only the default.</summary>
+    internal bool DensityExplicit { get; private init; }
     internal double CursorIntensity { get; private init; } = EngineConstants.DefaultCursorIntensity;
     internal int Fps { get; private init; } = EngineConstants.DefaultTargetFps;
 
     internal static CliOptions Parse(string[] args)
     {
         var mode = GlyphMode.AsciiMatrix;
-        var hasMovie = false;
+        var poolMode = GlyphMode.AsciiMatrix;
+        var probeSoftFont = false;
+        var modeName = "ascii";
         var hasChar = false;
         var singleChar = '0';
         var duration = 5.0;
@@ -314,12 +341,26 @@ internal sealed class CliOptions
                 case "--mode":
                     if (++i >= args.Length)
                         return Error("missing value for --mode");
+                    modeName = args[i];
                     if (args[i] == "movie")
-                        hasMovie = true;
+                    {
+                        poolMode = GlyphMode.Movie;
+                        probeSoftFont = true;
+                    }
+                    else if (args[i] == "kana")
+                    {
+                        poolMode = GlyphMode.Movie;
+                        probeSoftFont = false;
+                    }
                     else if (args[i] == "ascii")
-                        hasMovie = false;
+                    {
+                        poolMode = GlyphMode.AsciiMatrix;
+                        probeSoftFont = false;
+                    }
                     else
-                        return Error("unknown --mode value (expected 'ascii' or 'movie')");
+                    {
+                        return Error("unknown --mode value (expected 'ascii', 'movie', or 'kana')");
+                    }
                     break;
                 case "--char":
                     if (++i >= args.Length)
@@ -399,16 +440,16 @@ internal sealed class CliOptions
             }
         }
 
-        if (hasChar && hasMovie)
-            return Error("--char and --mode movie cannot be used together");
+        if (hasChar && poolMode == GlyphMode.Movie)
+            return Error($"--char and --mode {modeName} cannot be used together");
 
         if (hasDurationFlag && hasPositionalDuration)
             return Error("specify duration either as a positional argument or via --duration, not both");
 
         if (hasChar)
             mode = GlyphMode.Single;
-        else if (hasMovie)
-            mode = GlyphMode.Movie;
+        else
+            mode = poolMode;
 
         if (!hasDensityFlag && mode == GlyphMode.Movie)
             density = EngineConstants.DefaultMovieDensity;
@@ -421,6 +462,8 @@ internal sealed class CliOptions
             SingleChar = singleChar,
             DurationSeconds = duration,
             Density = density,
+            DensityExplicit = hasDensityFlag,
+            ProbeSoftFont = mode == GlyphMode.Movie && probeSoftFont,
             CursorIntensity = cursorIntensity,
             Fps = fps,
             Colors = colors,
@@ -781,6 +824,171 @@ internal static class TerminalCapabilities
         return false;
     }
 
+    /// <summary>
+    /// True only when the terminal confirms soft font (DECDLD) support. Otherwise returns false with
+    /// the reason: no VT output, stdin not a tty, a ConPTY host other than Windows Terminal, or no DA1 reply.
+    /// </summary>
+    internal static bool CanUseSoftFont(TerminalColorMode colorMode, out string reason)
+    {
+        reason = string.Empty;
+        if (colorMode == TerminalColorMode.None)
+        {
+            reason = "VT output is not available";
+            return false;
+        }
+
+        if (Console.IsInputRedirected)
+        {
+            reason = "stdin is not a tty, so soft font (DECDLD) support cannot be checked";
+            return false;
+        }
+
+        if (IsBehindOtherPseudoConsoleHost())
+        {
+            reason = "the Windows console host answers terminal queries for this terminal, so soft font (DECDLD) support cannot be checked";
+            return false;
+        }
+
+        switch (QuerySoftFontSupport())
+        {
+            case true:
+                return true;
+            case false:
+                reason = "terminal does not report soft font (DECDLD) support";
+                return false;
+            default:
+                reason = "terminal did not answer the device attributes query";
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Asks the terminal for its attributes (DA1, <c>CSI c</c>) and reports whether attribute 7
+    /// (soft character sets, DECDLD) is listed. Returns null when the terminal does not answer in time.
+    /// </summary>
+    internal static bool? QuerySoftFontSupport(int timeoutMs = 1000)
+    {
+        Span<char> response = stackalloc char[128];
+        var length = 0;
+        Action restore;
+        if (OperatingSystem.IsWindows())
+        {
+            if (!TryEnableWindowsVtInput(out restore))
+                return null;
+        }
+        else if (!NativeTermios.TryEnableRawMode(out restore))
+        {
+            return null;
+        }
+
+        try
+        {
+            Console.Out.Write("\u001b[c");
+            Console.Out.Flush();
+
+            Span<byte> bytes = stackalloc byte[64];
+            var deadline = Stopwatch.GetTimestamp() + timeoutMs * Stopwatch.Frequency / 1000;
+            while (Stopwatch.GetTimestamp() < deadline && length < response.Length)
+            {
+                var gotInput = false;
+                if (OperatingSystem.IsWindows())
+                {
+                    while (Console.KeyAvailable && length < response.Length)
+                    {
+                        response[length++] = Console.ReadKey(intercept: true).KeyChar;
+                        gotInput = true;
+                    }
+                }
+                else if (NativeTermios.TryReadInput(bytes, out var read))
+                {
+                    for (var i = 0; i < read && length < response.Length; i++)
+                        response[length++] = (char)bytes[i];
+                    gotInput = true;
+                }
+
+                if (gotInput && TryParseDeviceAttributes(response[..length], out var softFont))
+                    return softFont;
+                if (!gotInput)
+                    Thread.Sleep(5);
+            }
+
+            return null;
+        }
+        finally
+        {
+            restore();
+        }
+    }
+
+    /// <summary>
+    /// Parses a DA1 reply such as <c>ESC [ ? 61 ; 6 ; 7 ; 22 c</c>. Attribute 7 means soft character sets;
+    /// attributes are only defined for the VT200-and-later classes (first parameter 61-69).
+    /// </summary>
+    internal static bool TryParseDeviceAttributes(ReadOnlySpan<char> text, out bool softFont)
+    {
+        softFont = false;
+        var start = text.IndexOf("\u001b[?".AsSpan());
+        if (start < 0)
+            return false;
+
+        var body = text[(start + 3)..];
+        var end = body.IndexOf('c');
+        if (end < 0)
+            return false;
+
+        body = body[..end];
+        var index = 0;
+        var isVt200Class = false;
+        foreach (var range in body.Split(';'))
+        {
+            if (!int.TryParse(body[range], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value))
+                return false;
+            if (index == 0)
+                isVt200Class = value is >= 61 and <= 69;
+            else if (isVt200Class && value == 7)
+                softFont = true;
+            index++;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// True when a terminal other than Windows Terminal hosts this process through ConPTY (VS Code and
+    /// other xterm.js hosts, for example). conhost sits in between and answers DA1 with its own attributes,
+    /// which list soft fonts even when the hosting terminal cannot draw them. Under ConPTY the console
+    /// window is a hidden pseudo window; a classic conhost window is visible and draws soft fonts itself.
+    /// </summary>
+    internal static bool IsBehindOtherPseudoConsoleHost()
+    {
+        if (!OperatingSystem.IsWindows())
+            return false;
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_SESSION")))
+            return false;
+
+        var window = GetConsoleWindow();
+        return window == IntPtr.Zero || !IsWindowVisible(window);
+    }
+
+    private static bool TryEnableWindowsVtInput(out Action restore)
+    {
+        restore = static () => { };
+        var handle = GetStdHandle(-10);
+        if (handle == IntPtr.Zero || handle == new IntPtr(-1) || !GetConsoleMode(handle, out var original))
+            return false;
+
+        // VT input delivers the terminal's reply as input; line input and echo would hold it back or print it.
+        const uint enableEchoInput = 0x0004;
+        const uint enableLineInput = 0x0002;
+        const uint enableVtInput = 0x0200;
+        var mode = (original | enableVtInput) & ~(enableEchoInput | enableLineInput);
+        if (!SetConsoleMode(handle, mode))
+            return false;
+
+        restore = () => SetConsoleMode(handle, original);
+        return true;
+    }
+
     private static bool HasTrueColorEnv(string? colorTerm)
     {
         if (string.IsNullOrEmpty(colorTerm))
@@ -797,6 +1005,12 @@ internal static class TerminalCapabilities
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetConsoleWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
 }
 
 /// <summary>
@@ -1371,6 +1585,9 @@ internal sealed class GlyphPool
             case GlyphMode.Movie:
                 EnsureUtf8();
                 return new GlyphPool(MovieKatakanaChars, '\0', false, GlyphMode.Movie, requiresWideColumns: true);
+            case GlyphMode.MovieSoftFont:
+                // Plain ASCII codes, the terminal draws them with the soft font loaded by MatrixSoftFont.
+                return new GlyphPool(MatrixSoftFont.Codes, '\0', false, GlyphMode.MovieSoftFont, requiresWideColumns: false);
             default:
                 return new GlyphPool(AsciiMatrixChars, '\0', false, GlyphMode.AsciiMatrix, requiresWideColumns: false);
         }
@@ -1455,11 +1672,8 @@ internal sealed class MatrixEngine : IDisposable
         _targetFps = targetFps;
         _wideColumns = pool.RequiresWideColumns;
 
-        var effectiveDensity = Math.Clamp(density, 0, 1);
-        if (_wideColumns)
-            effectiveDensity = Math.Min(1.0, effectiveDensity * EngineConstants.MovieDensityBoost);
-
-        _effectiveDensity = effectiveDensity;
+        // Density is a fraction of the columns that can hold a stream, so wide (katakana) glyphs need no extra scaling.
+        _effectiveDensity = Math.Clamp(density, 0, 1);
         Resize();
     }
 
@@ -1884,9 +2098,11 @@ internal struct ColumnState
 
 internal static class TerminalSession
 {
-    internal static Action Enter(bool rawInput)
+    internal static Action Enter(bool rawInput, bool softFont)
     {
         Console.Out.Write("\u001b[?1049h\u001b[?25l");
+        if (softFont)
+            Console.Out.Write(MatrixSoftFont.LoadSequence);
         Console.Out.Flush();
 
         Action? disableRaw = null;
@@ -1896,10 +2112,146 @@ internal static class TerminalSession
         return () =>
         {
             disableRaw?.Invoke();
+            if (softFont)
+                Console.Out.Write(MatrixSoftFont.UnloadSequence);
             Console.Out.Write("\u001b[?25h\u001b[?1049l");
             Console.Out.Flush();
         };
     }
+}
+
+/// <summary>
+/// Movie glyphs sent to the terminal as a DECDLD soft font (DRCS), so no font has to be installed.
+/// The font lives only in the terminal session: it is mapped onto G0 while the rain runs and G0 is
+/// set back to ASCII on exit. It is used only after the terminal confirms DECDLD support (see TerminalCapabilities.CanUseSoftFont).
+/// Glyph shapes are rasterized from Matrix-Code.ttf by Rezmason (https://github.com/Rezmason/matrix),
+/// MIT License, Copyright (c) 2018 Rezmason. See THIRD_PARTY_NOTICES.md.
+/// </summary>
+internal static class MatrixSoftFont
+{
+    private const int CellWidth = 12;
+    private const int CellHeight = 24;
+    private const int HexPerRow = CellWidth / 4;
+
+    /// <summary>Character set designator for the soft font (intermediate SP, final '@').</summary>
+    private const string Dscs = " @";
+
+    /// <summary>Codes 0x21.. mapped to the glyphs in <see cref="Glyphs"/> order.</summary>
+    /// <remarks>A property, not a field: static fields initialize in source order and <see cref="Glyphs"/> is declared below.</remarks>
+    internal static string Codes => BuildCodes();
+
+    /// <summary>DECDLD download followed by the G0 designation of the soft font.</summary>
+    internal static string LoadSequence => BuildDecdld() + "\u001b(" + Dscs;
+
+    /// <summary>Designates US ASCII back into G0.</summary>
+    internal const string UnloadSequence = "\u001b(B";
+
+    private static string BuildCodes()
+    {
+        var chars = new char[Glyphs.Length];
+        for (var i = 0; i < chars.Length; i++)
+            chars[i] = (char)(0x21 + i);
+        return new string(chars);
+    }
+
+    private static string BuildDecdld()
+    {
+        // Pfn=1 font number, Pcn=1 first glyph at 0x21, Pe=0 erase this font, Pcmw=12 cell width,
+        // Pss=0 80x24 page, Pt=2 full-cell glyphs, Pcmh=24 cell height, Pcss=0 94-character set.
+        var sb = new StringBuilder(64 + Glyphs.Length * (CellWidth * 4 + 4));
+        sb.Append("\u001bP1;1;0;").Append(CellWidth).Append(";0;2;").Append(CellHeight).Append(";0{").Append(Dscs);
+        Span<int> rows = stackalloc int[CellHeight];
+        for (var g = 0; g < Glyphs.Length; g++)
+        {
+            if (g > 0)
+                sb.Append(';');
+
+            var hex = Glyphs[g];
+            for (var y = 0; y < CellHeight; y++)
+                rows[y] = Convert.ToInt32(hex.Substring(y * HexPerRow, HexPerRow), 16);
+
+            // Sixel bands: each character holds 6 vertical pixels of one column, top pixel in bit 0.
+            for (var band = 0; band * 6 < CellHeight; band++)
+            {
+                if (band > 0)
+                    sb.Append('/');
+                for (var x = 0; x < CellWidth; x++)
+                {
+                    var bits = 0;
+                    for (var k = 0; k < 6; k++)
+                    {
+                        var y = band * 6 + k;
+                        if (y < CellHeight && (rows[y] & (1 << (CellWidth - 1 - x))) != 0)
+                            bits |= 1 << k;
+                    }
+                    sb.Append((char)(0x3F + bits));
+                }
+            }
+        }
+
+        sb.Append("\u001b\\");
+        return sb.ToString();
+    }
+
+    /// <summary>12x24 bitmaps, one row per 3 hex digits, leftmost pixel in the highest bit.</summary>
+    private static readonly string[] Glyphs =
+    [
+        "0000000000000000000000000000D80D81981B81B01B0000000000000000000000000000", // " U+0022
+        "0000000000000000000000000601681F80600601F8168060000000000000000000000000", // * U+002A
+        "0000000000000000000000000600600601F81F8060060060000000000000000000000000", // + U+002B
+        "0000000000000001F83FC39C7BE7BE7BE7FE7FE7DE7DE79E39C3FC1F8000000000000000", // 0 U+0030
+        "0000000000000300F00F00F0070070070070070070070070070070070070000000000000", // 1 U+0031
+        "0000000000000001F83FC3843803803801C00E007003801C01C3FC7FE000000000000000", // 2 U+0032
+        "0000000000000001F83FC21C01E01E01E01C01C1F81E00700383FC7FE000000000000000", // 3 U+0033
+        "00000000000001C03E03E05E0DE19E11E21E7FE3FE01E01E01E01E3FE3FC000000000000", // 4 U+0034
+        "0000000000000007FE3FE01E01E01E3FE3803807807807803843FC1F8000000000000000", // 5 U+0035
+        "0000000000000007FE3FE01E01C01C0380380780700700F00F00F00F0000000000000000", // 7 U+0037
+        "0000000000000001F83FC39C79E39C39C1F81F839C39C79E39C3FC1F8000000000000000", // 8 U+0038
+        "0000000000000001F83FC39C79E79E79E79E79C7FC3803803C01F80F8000000000000000", // 9 U+0039
+        "0000000000000000000600F00F00600000000000000600F00F0060000000000000000000", // : U+003A
+        "0000000000000000000000180380700E01C01C00E0070038018000000000000000000000", // < U+003C
+        "0000000000000000000001801C00E00700380380700E01C0180000000000000000000000", // > U+003E
+        "0000000000000007FC3FC01C03C0780700F00E01C03C03807807FC7FE000000000000000", // z U+007A
+        "000000000000000060060060060060060060060060060060060060060000000000000000", // | U+007C
+        "000000000000000060060060060060000000000060060060060060060000000000000000", // ¦ U+00A6
+        "00000000000000000000000000000000079E79E000000000000000000000000000000000", // ╌ U+254C
+        "0000000000000000000000000000000600F00F0060000000000000000000000000000000", // ▪ U+25AA
+        "0000000000000003FC7FE7FE7007003703703703F01F003001800C000000000000000000", // ア U+30A2
+        "0000000000007FE3FC0600607FE7FE70E70E70E70C3003003801800F0038000000000000", // ウ U+30A6
+        "0000000000000000003FC3FC0600600600600600600603FC7FE7FE000000000000000000", // エ U+30A8
+        "0000000000007FE3FC1C01C07FC7FC1E01E01E01E01E01E01B01B819C184000000000000", // オ U+30AA
+        "0000000000000000380383FC7FC7387387387387387187187183CC3C6000000000000000", // カ U+30AB
+        "0000000000000000700707FE7FE0700600600603FC7FE0E00E00E00E0000000000000000", // キ U+30AD
+        "0000000000007FE3FC0380387F87F83F81DC1CC1C41C01C00C00E007003C000000000000", // ケ U+30B1
+        "0000000000000003F87F87F86006006006006006006006007FE7FE3FC000000000000000", // コ U+30B3
+        "0000000000000003983983983FC7FE3FC3983981981801801C00E0078000000000000000", // サ U+30B5
+        "00000000000000003E03C00040043C63E23C2003003801E00FE0FE03E000000000000000", // シ U+30B7
+        "0000000000000001FC1FE1FE1C01C01C01C00C01E01E03F03B831C200000000000000000", // ス U+30B9
+        "0000000000007FE01C01C01C7FE7FE7FC31C31C31C19C09C01C3F87F87F8000000000000", // セ U+30BB
+        "00000000000000070E70C71C71C71C31C31C3803801801C00E007803C000000000000000", // ソ U+30BD
+        "0000000000000003F87F87F871870C30C3363F03E03801C00E007C01C000000000000000", // タ U+30BF
+        "00000000000000032476C76C76C76C76C36C3003003801800E007C01C000000000000000", // ツ U+30C4
+        "0000000000000003FC7FC3FC0003FC7FE3FC0E00E00E006007003C00C000000000000000", // テ U+30C6
+        "0000000000000000C00C00C03FC7FE3FC0C00C00C00E006007003801C000000000000000", // ナ U+30CA
+        "0000000000000000003FC3FC0000000000000000000003FC7FE7FE000000000000000000", // ニ U+30CB
+        "0000000000000003FC7FC3FC3003803903F01F03E07C07E007003C004000000000000000", // ヌ U+30CC
+        "0000000000000600603FC3FE3FC3803801C01E03F07FC67E0600603FC7FE000000000000", // ネ U+30CD
+        "0000000000000001D819819819839C39C39C39C30C30C30E706706700000000000000000", // ハ U+30CF
+        "00000000000000000C00C00C3FC3FC3FC00C00C00C01C01C3FC3F83F0000000000000000", // ヒ U+30D2
+        "0000000000000600703FE3FE3FC07017C37C37C37C37C3747766707FC7FE000000000000", // ホ U+30DB
+        "0000000000000000003FC3FC30030030030819C1980F80F8030070000000000000000000", // マ U+30DE
+        "0000000000000000043FE7FE7E000001C3FC3FC30000003E3FE7FC300000000000000000", // ミ U+30DF
+        "00000000000000000003003003803819819839C39C30C7EC7FE7FE000000000000000000", // ム U+30E0
+        "0000000000000000001801C01D81F81F03E07C06E006007003801E000000000000000000", // メ U+30E1
+        "0000000000000003FC7FC0380383F87FE3FE0380380380383F07F03F0000000000000000", // モ U+30E2
+        "00000000000000001C7FE7FE7FC7183183183B81B80F80380380383FE000000000000000", // ヤ U+30E4
+        "0000000000000007FE7FE6066066066067FE7FE6066066066067FE7FE000000000000000", // ヨ U+30E8
+        "0000000000000000003FC3FC0003FC7FE7FC3003003801801E00FC000000000000000000", // ラ U+30E9
+        "00000000000000070E70E70E70E70E70E30E30C3003803801C00F8078000000000000000", // リ U+30EA
+        "0000000000000000007FE7FE70E70E70E7047003003801801E0078000000000000000000", // ワ U+30EF
+        "0000000000000000000000000000000003FC3FC000000000000000000000000000000000", // ー U+30FC
+        "0000000000000000000000000000F00F00000000F00F0000000000000000000000000000", // ꞊ U+A78A
+    ];
 }
 
 internal static class TerminalInput
@@ -2075,6 +2427,7 @@ Usage:
   matrix --char <character>
   matrix --mode ascii
   matrix --mode movie
+  matrix --mode kana
   matrix --density <0.0-1.0>
   matrix --fps <1-60>
   matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
@@ -2091,12 +2444,16 @@ Modes:
   (default)   ascii-matrix character pool
   --mode ascii  same as default
   --char X    single-character mode
-  --mode movie  full-width katakana-heavy pool with Japanese marks and symbols (UTF-8 required)
+  --mode movie  film glyphs (mirrored katakana, digits, symbols) drawn with a terminal
+                soft font (DECDLD) when the terminal reports support, such as Windows
+                Terminal. Otherwise warns and falls back to the kana pool.
+  --mode kana   full-width katakana with Japanese marks and symbols, without the soft
+                font check (UTF-8 required)
 
 Density:
-  --density     Rain density from 0.0 (sparse) to 1.0 (dense).
-                Default 0.55 (ascii-matrix / single). Default 0.7 (movie).
-                Movie mode applies a 1.5x effective boost (capped at 1.0).
+  --density     Rain density from 0.0 (sparse) to 1.0 (dense). Default 0.55.
+                Katakana glyphs (--mode kana, or --mode movie when it falls
+                back) default to 0.7.
 
 Timing:
   --fps         Frames per second (1-60). Default 14.
@@ -2126,6 +2483,7 @@ Examples:
   matrix --mode movie --density 0.8
   matrix --fps 24
   matrix --mode movie --fps 7
+  matrix --mode kana
   matrix --pattern resurrections
   matrix --pattern rain
   matrix --pattern rainbow --bg #050505
