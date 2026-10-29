@@ -35,8 +35,9 @@ matrix
 matrix 0
 matrix --duration 0
 
-# Use ASCII glyphs or full-width movie-style glyphs. Default is ascii.
-matrix --mode <ascii|movie>
+# Use ASCII glyphs, full-width movie-style glyphs, or film glyphs drawn with a terminal soft font. Default is ascii.
+# real needs soft font (DECDLD) support, such as Windows Terminal; other terminals show plain ASCII.
+matrix --mode <ascii|movie|real>
 
 # Pick a built-in color pattern.
 matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
@@ -56,7 +57,7 @@ matrix --char "λ"
 
 ```bash
 matrix [duration]
-matrix [--duration <seconds>] [--mode <ascii|movie>] [--char <character>]
+matrix [--duration <seconds>] [--mode <ascii|movie|real>] [--char <character>]
        [--density <0.0-1.0>] [--fps <1-60>]
        [--pattern <classic|resurrections|operator|twilight|rain|rainbow>]
        [--bg <color>] [--head <color>] [--bright <color>] [--dim <color>]

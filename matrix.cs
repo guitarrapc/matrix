@@ -53,6 +53,12 @@ if (colorMode == TerminalColorMode.Ansi16)
 }
 else if (colorMode == TerminalColorMode.None)
 {
+    if (options.Mode == GlyphMode.Real)
+    {
+        Console.Error.WriteLine("Error: real mode requires a VT-capable terminal (DECDLD soft fonts).");
+        Environment.Exit(1);
+    }
+
     Console.Error.WriteLine("warning: ANSI color not supported; falling back to colorless ASCII output");
 }
 
@@ -81,7 +87,7 @@ var palette = AnsiPalette.Create(options.Colors, colorMode, cursorIntensity);
 using var engine = new MatrixEngine(pool, palette, options.Density, options.Fps);
 using var pacer = new FramePacer(options.Fps);
 
-var restore = TerminalSession.Enter(keyExitEnabled);
+var restore = TerminalSession.Enter(keyExitEnabled, softFont: options.Mode == GlyphMode.Real);
 var exitRequested = false;
 
 Console.CancelKeyPress += (_, e) =>
@@ -145,6 +151,7 @@ internal enum GlyphMode : byte
     AsciiMatrix = 0,
     Single = 1,
     Movie = 2,
+    Real = 3,
 }
 
 internal enum CellState : byte
@@ -289,7 +296,7 @@ internal sealed class CliOptions
     internal static CliOptions Parse(string[] args)
     {
         var mode = GlyphMode.AsciiMatrix;
-        var hasMovie = false;
+        var poolMode = GlyphMode.AsciiMatrix;
         var hasChar = false;
         var singleChar = '0';
         var duration = 5.0;
@@ -315,11 +322,13 @@ internal sealed class CliOptions
                     if (++i >= args.Length)
                         return Error("missing value for --mode");
                     if (args[i] == "movie")
-                        hasMovie = true;
+                        poolMode = GlyphMode.Movie;
+                    else if (args[i] == "real")
+                        poolMode = GlyphMode.Real;
                     else if (args[i] == "ascii")
-                        hasMovie = false;
+                        poolMode = GlyphMode.AsciiMatrix;
                     else
-                        return Error("unknown --mode value (expected 'ascii' or 'movie')");
+                        return Error("unknown --mode value (expected 'ascii', 'movie', or 'real')");
                     break;
                 case "--char":
                     if (++i >= args.Length)
@@ -399,16 +408,18 @@ internal sealed class CliOptions
             }
         }
 
-        if (hasChar && hasMovie)
+        if (hasChar && poolMode == GlyphMode.Movie)
             return Error("--char and --mode movie cannot be used together");
+        if (hasChar && poolMode == GlyphMode.Real)
+            return Error("--char and --mode real cannot be used together");
 
         if (hasDurationFlag && hasPositionalDuration)
             return Error("specify duration either as a positional argument or via --duration, not both");
 
         if (hasChar)
             mode = GlyphMode.Single;
-        else if (hasMovie)
-            mode = GlyphMode.Movie;
+        else
+            mode = poolMode;
 
         if (!hasDensityFlag && mode == GlyphMode.Movie)
             density = EngineConstants.DefaultMovieDensity;
@@ -1371,6 +1382,9 @@ internal sealed class GlyphPool
             case GlyphMode.Movie:
                 EnsureUtf8();
                 return new GlyphPool(MovieKatakanaChars, '\0', false, GlyphMode.Movie, requiresWideColumns: true);
+            case GlyphMode.Real:
+                // Plain ASCII codes; the terminal draws them with the soft font loaded by MatrixSoftFont.
+                return new GlyphPool(MatrixSoftFont.Codes, '\0', false, GlyphMode.Real, requiresWideColumns: false);
             default:
                 return new GlyphPool(AsciiMatrixChars, '\0', false, GlyphMode.AsciiMatrix, requiresWideColumns: false);
         }
@@ -1884,9 +1898,11 @@ internal struct ColumnState
 
 internal static class TerminalSession
 {
-    internal static Action Enter(bool rawInput)
+    internal static Action Enter(bool rawInput, bool softFont)
     {
         Console.Out.Write("\u001b[?1049h\u001b[?25l");
+        if (softFont)
+            Console.Out.Write(MatrixSoftFont.LoadSequence);
         Console.Out.Flush();
 
         Action? disableRaw = null;
@@ -1896,10 +1912,146 @@ internal static class TerminalSession
         return () =>
         {
             disableRaw?.Invoke();
+            if (softFont)
+                Console.Out.Write(MatrixSoftFont.UnloadSequence);
             Console.Out.Write("\u001b[?25h\u001b[?1049l");
             Console.Out.Flush();
         };
     }
+}
+
+/// <summary>
+/// Movie glyphs sent to the terminal as a DECDLD soft font (DRCS), so no font has to be installed.
+/// The font lives only in the terminal session: it is mapped onto G0 while the rain runs and G0 is
+/// set back to ASCII on exit. Terminals without DECDLD support show the plain ASCII codes instead.
+/// Glyph shapes are rasterized from Matrix-Code.ttf by Rezmason (https://github.com/Rezmason/matrix),
+/// MIT License, Copyright (c) 2018 Rezmason. See THIRD_PARTY_NOTICES.md.
+/// </summary>
+internal static class MatrixSoftFont
+{
+    private const int CellWidth = 12;
+    private const int CellHeight = 24;
+    private const int HexPerRow = CellWidth / 4;
+
+    /// <summary>Character set designator for the soft font (intermediate SP, final '@').</summary>
+    private const string Dscs = " @";
+
+    /// <summary>Codes 0x21.. mapped to the glyphs in <see cref="Glyphs"/> order.</summary>
+    /// <remarks>A property, not a field: static fields initialize in source order and <see cref="Glyphs"/> is declared below.</remarks>
+    internal static string Codes => BuildCodes();
+
+    /// <summary>DECDLD download followed by the G0 designation of the soft font.</summary>
+    internal static string LoadSequence => BuildDecdld() + "\u001b(" + Dscs;
+
+    /// <summary>Designates US ASCII back into G0.</summary>
+    internal const string UnloadSequence = "\u001b(B";
+
+    private static string BuildCodes()
+    {
+        var chars = new char[Glyphs.Length];
+        for (var i = 0; i < chars.Length; i++)
+            chars[i] = (char)(0x21 + i);
+        return new string(chars);
+    }
+
+    private static string BuildDecdld()
+    {
+        // Pfn=1 font number, Pcn=1 first glyph at 0x21, Pe=0 erase this font, Pcmw=12 cell width,
+        // Pss=0 80x24 page, Pt=2 full-cell glyphs, Pcmh=24 cell height, Pcss=0 94-character set.
+        var sb = new StringBuilder(64 + Glyphs.Length * (CellWidth * 4 + 4));
+        sb.Append("\u001bP1;1;0;").Append(CellWidth).Append(";0;2;").Append(CellHeight).Append(";0{").Append(Dscs);
+        Span<int> rows = stackalloc int[CellHeight];
+        for (var g = 0; g < Glyphs.Length; g++)
+        {
+            if (g > 0)
+                sb.Append(';');
+
+            var hex = Glyphs[g];
+            for (var y = 0; y < CellHeight; y++)
+                rows[y] = Convert.ToInt32(hex.Substring(y * HexPerRow, HexPerRow), 16);
+
+            // Sixel bands: each character holds 6 vertical pixels of one column, top pixel in bit 0.
+            for (var band = 0; band * 6 < CellHeight; band++)
+            {
+                if (band > 0)
+                    sb.Append('/');
+                for (var x = 0; x < CellWidth; x++)
+                {
+                    var bits = 0;
+                    for (var k = 0; k < 6; k++)
+                    {
+                        var y = band * 6 + k;
+                        if (y < CellHeight && (rows[y] & (1 << (CellWidth - 1 - x))) != 0)
+                            bits |= 1 << k;
+                    }
+                    sb.Append((char)(0x3F + bits));
+                }
+            }
+        }
+
+        sb.Append("\u001b\\");
+        return sb.ToString();
+    }
+
+    /// <summary>12x24 bitmaps, one row per 3 hex digits, leftmost pixel in the highest bit.</summary>
+    private static readonly string[] Glyphs =
+    [
+        "0000000000000000000000000000D80D81981B81B01B0000000000000000000000000000", // " U+0022
+        "0000000000000000000000000601681F80600601F8168060000000000000000000000000", // * U+002A
+        "0000000000000000000000000600600601F81F8060060060000000000000000000000000", // + U+002B
+        "0000000000000001F83FC39C7BE7BE7BE7FE7FE7DE7DE79E39C3FC1F8000000000000000", // 0 U+0030
+        "0000000000000300F00F00F0070070070070070070070070070070070070000000000000", // 1 U+0031
+        "0000000000000001F83FC3843803803801C00E007003801C01C3FC7FE000000000000000", // 2 U+0032
+        "0000000000000001F83FC21C01E01E01E01C01C1F81E00700383FC7FE000000000000000", // 3 U+0033
+        "00000000000001C03E03E05E0DE19E11E21E7FE3FE01E01E01E01E3FE3FC000000000000", // 4 U+0034
+        "0000000000000007FE3FE01E01E01E3FE3803807807807803843FC1F8000000000000000", // 5 U+0035
+        "0000000000000007FE3FE01E01C01C0380380780700700F00F00F00F0000000000000000", // 7 U+0037
+        "0000000000000001F83FC39C79E39C39C1F81F839C39C79E39C3FC1F8000000000000000", // 8 U+0038
+        "0000000000000001F83FC39C79E79E79E79E79C7FC3803803C01F80F8000000000000000", // 9 U+0039
+        "0000000000000000000600F00F00600000000000000600F00F0060000000000000000000", // : U+003A
+        "0000000000000000000000180380700E01C01C00E0070038018000000000000000000000", // < U+003C
+        "0000000000000000000001801C00E00700380380700E01C0180000000000000000000000", // > U+003E
+        "0000000000000007FC3FC01C03C0780700F00E01C03C03807807FC7FE000000000000000", // z U+007A
+        "000000000000000060060060060060060060060060060060060060060000000000000000", // | U+007C
+        "000000000000000060060060060060000000000060060060060060060000000000000000", // ¦ U+00A6
+        "00000000000000000000000000000000079E79E000000000000000000000000000000000", // ╌ U+254C
+        "0000000000000000000000000000000600F00F0060000000000000000000000000000000", // ▪ U+25AA
+        "0000000000000003FC7FE7FE7007003703703703F01F003001800C000000000000000000", // ア U+30A2
+        "0000000000007FE3FC0600607FE7FE70E70E70E70C3003003801800F0038000000000000", // ウ U+30A6
+        "0000000000000000003FC3FC0600600600600600600603FC7FE7FE000000000000000000", // エ U+30A8
+        "0000000000007FE3FC1C01C07FC7FC1E01E01E01E01E01E01B01B819C184000000000000", // オ U+30AA
+        "0000000000000000380383FC7FC7387387387387387187187183CC3C6000000000000000", // カ U+30AB
+        "0000000000000000700707FE7FE0700600600603FC7FE0E00E00E00E0000000000000000", // キ U+30AD
+        "0000000000007FE3FC0380387F87F83F81DC1CC1C41C01C00C00E007003C000000000000", // ケ U+30B1
+        "0000000000000003F87F87F86006006006006006006006007FE7FE3FC000000000000000", // コ U+30B3
+        "0000000000000003983983983FC7FE3FC3983981981801801C00E0078000000000000000", // サ U+30B5
+        "00000000000000003E03C00040043C63E23C2003003801E00FE0FE03E000000000000000", // シ U+30B7
+        "0000000000000001FC1FE1FE1C01C01C01C00C01E01E03F03B831C200000000000000000", // ス U+30B9
+        "0000000000007FE01C01C01C7FE7FE7FC31C31C31C19C09C01C3F87F87F8000000000000", // セ U+30BB
+        "00000000000000070E70C71C71C71C31C31C3803801801C00E007803C000000000000000", // ソ U+30BD
+        "0000000000000003F87F87F871870C30C3363F03E03801C00E007C01C000000000000000", // タ U+30BF
+        "00000000000000032476C76C76C76C76C36C3003003801800E007C01C000000000000000", // ツ U+30C4
+        "0000000000000003FC7FC3FC0003FC7FE3FC0E00E00E006007003C00C000000000000000", // テ U+30C6
+        "0000000000000000C00C00C03FC7FE3FC0C00C00C00E006007003801C000000000000000", // ナ U+30CA
+        "0000000000000000003FC3FC0000000000000000000003FC7FE7FE000000000000000000", // ニ U+30CB
+        "0000000000000003FC7FC3FC3003803903F01F03E07C07E007003C004000000000000000", // ヌ U+30CC
+        "0000000000000600603FC3FE3FC3803801C01E03F07FC67E0600603FC7FE000000000000", // ネ U+30CD
+        "0000000000000001D819819819839C39C39C39C30C30C30E706706700000000000000000", // ハ U+30CF
+        "00000000000000000C00C00C3FC3FC3FC00C00C00C01C01C3FC3F83F0000000000000000", // ヒ U+30D2
+        "0000000000000600703FE3FE3FC07017C37C37C37C37C3747766707FC7FE000000000000", // ホ U+30DB
+        "0000000000000000003FC3FC30030030030819C1980F80F8030070000000000000000000", // マ U+30DE
+        "0000000000000000043FE7FE7E000001C3FC3FC30000003E3FE7FC300000000000000000", // ミ U+30DF
+        "00000000000000000003003003803819819839C39C30C7EC7FE7FE000000000000000000", // ム U+30E0
+        "0000000000000000001801C01D81F81F03E07C06E006007003801E000000000000000000", // メ U+30E1
+        "0000000000000003FC7FC0380383F87FE3FE0380380380383F07F03F0000000000000000", // モ U+30E2
+        "00000000000000001C7FE7FE7FC7183183183B81B80F80380380383FE000000000000000", // ヤ U+30E4
+        "0000000000000007FE7FE6066066066067FE7FE6066066066067FE7FE000000000000000", // ヨ U+30E8
+        "0000000000000000003FC3FC0003FC7FE7FC3003003801801E00FC000000000000000000", // ラ U+30E9
+        "00000000000000070E70E70E70E70E70E30E30C3003803801C00F8078000000000000000", // リ U+30EA
+        "0000000000000000007FE7FE70E70E70E7047003003801801E0078000000000000000000", // ワ U+30EF
+        "0000000000000000000000000000000003FC3FC000000000000000000000000000000000", // ー U+30FC
+        "0000000000000000000000000000F00F00000000F00F0000000000000000000000000000", // ꞊ U+A78A
+    ];
 }
 
 internal static class TerminalInput
@@ -2075,6 +2227,7 @@ Usage:
   matrix --char <character>
   matrix --mode ascii
   matrix --mode movie
+  matrix --mode real
   matrix --density <0.0-1.0>
   matrix --fps <1-60>
   matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
@@ -2092,6 +2245,8 @@ Modes:
   --mode ascii  same as default
   --char X    single-character mode
   --mode movie  full-width katakana-heavy pool with Japanese marks and symbols (UTF-8 required)
+  --mode real   film glyphs drawn with a terminal soft font (DECDLD); needs a terminal
+                with soft font support such as Windows Terminal or xterm (VT340)
 
 Density:
   --density     Rain density from 0.0 (sparse) to 1.0 (dense).
@@ -2126,6 +2281,7 @@ Examples:
   matrix --mode movie --density 0.8
   matrix --fps 24
   matrix --mode movie --fps 7
+  matrix --mode real 30
   matrix --pattern resurrections
   matrix --pattern rain
   matrix --pattern rainbow --bg #050505

@@ -35,8 +35,9 @@ matrix
 matrix 0
 matrix --duration 0
 
-# ASCII グリフ、または映画風の全角グリフを使います。デフォルトは ascii です。
-matrix --mode <ascii|movie>
+# ASCII グリフ、映画風の全角グリフ、またはソフトフォントで描く映画のグリフを使います。デフォルトは ascii です。
+# real にはソフトフォント (DECDLD) 対応の端末 (Windows Terminal など) が必要です。非対応の端末では ASCII がそのまま表示されます。
+matrix --mode <ascii|movie|real>
 
 # 組み込みのカラーパターンを選びます。
 matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
@@ -56,7 +57,7 @@ matrix --char "λ"
 
 ```bash
 matrix [duration]
-matrix [--duration <seconds>] [--mode <ascii|movie>] [--char <character>]
+matrix [--duration <seconds>] [--mode <ascii|movie|real>] [--char <character>]
        [--density <0.0-1.0>] [--fps <1-60>]
        [--pattern <classic|resurrections|operator|twilight|rain|rainbow>]
        [--bg <color>] [--head <color>] [--bright <color>] [--dim <color>]

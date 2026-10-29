@@ -32,7 +32,7 @@ The grid matches **terminal display cells** (width x height), not Unicode code u
 
 | Mode | Anchor columns | Glyph width |
 |---|---|---|
-| ascii-matrix / single | Any | 1 cell |
+| ascii-matrix / single / real | Any | 1 cell |
 | movie | Even columns only (`0`, `2`, `4`, ...) | 2 cells (full-width) |
 
 Wide glyphs use an **anchor** cell plus a **Continuation** cell to the right. Continuation cells emit **nothing** during render, not even a space.
@@ -63,7 +63,7 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 | Parameter | Value |
 |---|---|
 | FPS (`--fps`) | **14** (1-60) |
-| `--density` | 0.0-1.0; default **0.55** (ascii-matrix / single), **0.7** (movie) |
+| `--density` | 0.0-1.0; default **0.55** (ascii-matrix / single / real), **0.7** (movie) |
 | Trail length | height x **0.30** ... **0.90** per stream, min **10** cells |
 | Fall speed | 1-2 cells/frame per stream |
 | Glyph mutation | ~35% per frame per visible stream cell |
@@ -83,8 +83,9 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 | **ascii-matrix** (default) | none or `--mode ascii` | ASCII letters, digits, symbols |
 | **single** | `--char X` | One user character |
 | **movie** | `--mode movie` | Full-width katakana-heavy mix |
+| **real** | `--mode real` | Film glyphs (mirrored katakana, digits, symbols) from a soft font |
 
-`--char` and `--mode movie` together are a fatal error. `--char` selects single-character mode.
+`--char` together with `--mode movie` or `--mode real` is a fatal error. `--char` selects single-character mode.
 
 **movie** requires UTF-8 output. The program attempts to set console input/output to UTF-8 and fails if the terminal cannot support it. Movie streams use **full-width glyphs on even columns only**; half-width characters are excluded because mixed display widths break vertical alignment.
 
@@ -98,6 +99,15 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 
 Every movie glyph stays within **U+3000-U+30FF** (see Lessons Learned: movie mode font fallback stutter).
 
+**real** draws the glyphs seen in the films, which Unicode cannot express (many are mirrored katakana and digits). The goal is film-accurate glyphs **without installing or shipping a font**.
+
+- The glyphs are sent to the terminal as a **DECDLD soft font** (DRCS) when the rain starts, mapped onto G0, and G0 is set back to ASCII on exit. The font exists only in that terminal session.
+- Streams emit ASCII codes `0x21` and up; the terminal draws each code with its soft-font glyph. SGR colors apply as usual, so every color pattern works.
+- 55 glyphs, each a 12 x 24 one-bit bitmap embedded in the binary. They are rasterized from `Matrix-Code.ttf` by Rezmason (MIT License, see `THIRD_PARTY_NOTICES.md`).
+- Glyphs are 1 cell wide, so real mode uses every column like ascii-matrix and needs no UTF-8.
+- Requires soft font support: Windows Terminal, xterm with a VT340 terminal ID, mlterm, and RLogin. Terminals without it (iTerm2, kitty, Alacritty, GNOME Terminal, macOS Terminal) show the plain ASCII codes instead. Terminal support is not detected yet.
+- Fails when the console cannot enable VT processing.
+
 ---
 
 ## Command-Line Interface
@@ -106,7 +116,7 @@ Every movie glyph stays within **U+3000-U+30FF** (see Lessons Learned: movie mod
 matrix [duration]
 matrix --duration <seconds>
 matrix --char <character>
-matrix --mode <ascii|movie>
+matrix --mode <ascii|movie|real>
 matrix --density <0.0-1.0>
 matrix --fps <1-60>
 matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
@@ -212,6 +222,14 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 - **Wide screens:** on a full-screen 5120 x 2160 display (565 x 112 cells), the render thread stays saturated in movie mode with or without U+3000, and presents only about 8-12 FPS at both 14 and 30 FPS. ascii at the same size uses about 12%. A sampling profile of the render thread shows about 80% of its time in `IDWriteFontFallback::MapCharacters`, and only about 8% in shaping and under 1% in drawing. System font fallback ends a mapped run at every switch between Unicode ranges, even when both sides map to the same font. Only U+3000-U+30FF (CJK symbols, hiragana, katakana) stays in one run with katakana; full-width digits, kanji, and full-width symbols each start a new run. With U+3000 and a katakana-only pool, the same screen presents 28.8 FPS at about 50% CPU.
 - **Decision:** limit the movie pool to U+3000-U+30FF (katakana, marks, symbols). On the 5120 x 2160 screen at 30 FPS the render thread dropped from 91-94% to 30-36% CPU, and the present rate rose from about 11 FPS to the same rate as ascii.
 - **Pitfall:** do not reintroduce ASCII spaces inside movie rows, or glyphs outside U+3000-U+30FF. Look-alikes in other blocks (Suzhou numerals `〡`-`〩`, Kangxi radicals, enclosed CJK) also split runs or fall back to other fonts. Each fallback glyph still costs more to shape than an ASCII glyph, so movie mode has less headroom than ascii.
+
+### real mode glyph source
+
+- **Rejected:** switching the terminal font only while the program runs. Windows Terminal has no escape sequence for the font face, conhost (`SetCurrentConsoleFontEx`) accepts only installed fonts, and `AddFontResourceEx(FR_PRIVATE)` registers a font only for the calling process, not for the terminal process that draws the text. xterm (OSC 50) and iTerm2 (`SetProfile`) have their own sequences, but no sequence works across terminals.
+- **Rejected:** Unicode look-alikes. Mirrored katakana do not exist in Unicode, and non-ASCII glyphs bring back font fallback costs.
+- **Rejected:** drawing the screen as images (Sixel, kitty graphics) or as braille or block pixel art. Images are heavy at 14-60 FPS, and pixel art needs 2-3 cells per glyph.
+- **Decision:** DECDLD soft font. It is a VT220-era standard, supported by Windows Terminal, and the output stays ASCII.
+- **Glyph scaling:** `Matrix-Code.ttf` glyphs are about as wide as they are tall. Scaling them uniformly into a 12 x 24 cell left them 8 pixels tall, so width and height are scaled separately to a 10 x 16 box. The box size comes from the katakana only; the vertical bar and `¦` are taller and would shrink every glyph.
 
 ### Density and stutter
 
