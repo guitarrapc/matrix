@@ -186,16 +186,6 @@ internal static class EngineConstants
     internal const int MaxSpeed = 2;
     internal const double DefaultDensity = 0.55;
     internal const double DefaultMovieDensity = 0.7;
-    internal const int DensityActiveBasePercent = 90;
-    /// <summary>Average cells a stream travels before deactivating ≈ factor × height (see spawn equilibrium).</summary>
-    internal const double StreamLifetimeHeightFactor = 1.15;
-    internal const double AvgFallSpeedCells = (MinSpeed + MaxSpeed) / 2.0;
-    /// <summary>Frames to close an active-column deficit when below density target (~0.2s at 14 FPS).</summary>
-    internal const int DensityRecoveryFrames = 3;
-    /// <summary>Baseline spawn multiplier at/above target — compensates lifetime model error and ongoing deaths.</summary>
-    internal const double DensitySpawnHeadroom = 1.45;
-    /// <summary>Max trail-length scale when active columns are far below the density target (e.g. 0.35 → up to 35% longer).</summary>
-    internal const double TrailLengthDeficitMaxBoost = 0.35;
     internal const double TrailMinHeightFraction = 0.30;
     internal const double TrailMaxHeightFraction = 0.90;
     internal const int MinTrailCells = 10;
@@ -214,17 +204,8 @@ internal static class EngineConstants
     internal const float NearHeadBrightnessFloor = 0.72f;
     /// <summary>Rain shimmer can dim a trail, but should not erase it before the envelope fades out.</summary>
     internal const float RainWaveMinimum = 0.42f;
-    /// <summary>Cap simultaneous stream births so cohorts do not die in sync (~2–3s).</summary>
-    internal const int MaxSpawnsPerFrame = 4;
+    /// <summary>Two slots let the next stream enter at the top while the previous trail is still leaving at the bottom.</summary>
     internal const int MaxStreamsPerColumn = 2;
-    /// <summary>Begin considering same-column respawn once the head has crossed this screen fraction.</summary>
-    internal const double RecycleStartHeadFraction = 0.50;
-    /// <summary>Screen coverage below this fraction strongly favors immediate same-column respawn.</summary>
-    internal const double RecycleSparseVisibleFraction = 0.28;
-    /// <summary>Screen coverage above this fraction delays respawn until the head is off-screen.</summary>
-    internal const double RecycleDenseVisibleFraction = 0.72;
-    /// <summary>Maximum top-entry delay for recycled streams; initial streams keep the wider stagger.</summary>
-    internal const double RecycleInitialDelayHeightFraction = 0.22;
     /// <summary>Consecutive ticks with the same size before applying a terminal resize.</summary>
     internal const int ResizeStableFrames = 4;
 }
@@ -1651,14 +1632,12 @@ internal sealed class MatrixEngine : IDisposable
     private readonly AnsiPalette _palette;
     private readonly bool _wideColumns;
     private readonly double _effectiveDensity;
-    private int _activeChancePercent;
-    private int _baseSpawnChancePercent;
-    private int _spawnChancePercent;
-    private double _trailLengthBoost = 1.0;
     private readonly Random _rng = new();
 
     private Cell[] _grid = [];
     private ColumnState[] _columns = [];
+    /// <summary>Per column: frames until the next stream enters at the top.</summary>
+    private int[] _nextSpawnFrames = [];
     private byte[] _renderBuffer = [];
     private int _width;
     private int _height;
@@ -1667,7 +1646,6 @@ internal sealed class MatrixEngine : IDisposable
     private int _pendingResizeWidth;
     private int _pendingResizeHeight;
     private int _pendingResizeStable;
-    private int _spawnsThisFrame;
     private readonly int _targetFps;
 
     internal MatrixEngine(GlyphPool pool, AnsiPalette palette, double density, int targetFps)
@@ -1677,93 +1655,10 @@ internal sealed class MatrixEngine : IDisposable
         _targetFps = targetFps;
         _wideColumns = pool.RequiresWideColumns;
 
-        // Density is a fraction of the columns that can hold a stream, so wide (katakana) glyphs need no extra scaling.
+        // Density is the fraction of stream columns showing rain at any moment (see NextGapFrames).
+        // It counts columns that can hold a stream, so wide (katakana) glyphs need no extra scaling.
         _effectiveDensity = Math.Clamp(density, 0, 1);
         Resize();
-    }
-
-    private void UpdateDensityChances()
-    {
-        _activeChancePercent = Math.Min(100, (int)(_effectiveDensity * EngineConstants.DensityActiveBasePercent));
-        _baseSpawnChancePercent = ComputeEquilibriumSpawnPercent(_activeChancePercent, _height);
-        _spawnChancePercent = _baseSpawnChancePercent;
-    }
-
-    /// <summary>Adjust spawn rate and new-stream trail length from active-column shortfall vs density target.</summary>
-    private void RefreshAdaptiveSpawnChance()
-    {
-        var streamCount = 0;
-        var activeCount = 0;
-        for (var x = 0; x < _width; x++)
-        {
-            if (!IsStreamColumn(x))
-                continue;
-            streamCount++;
-            if (IsColumnActive(x))
-                activeCount++;
-        }
-
-        if (streamCount == 0 || _activeChancePercent <= 0)
-        {
-            _spawnChancePercent = 0;
-            _trailLengthBoost = 1.0;
-            return;
-        }
-
-        var targetFraction = _activeChancePercent / 100.0;
-        var currentFraction = activeCount / (double)streamCount;
-        var shortfall = Math.Max(0, targetFraction - currentFraction);
-        _trailLengthBoost = 1.0 + shortfall / Math.Max(0.01, targetFraction) * EngineConstants.TrailLengthDeficitMaxBoost;
-
-        if (_activeChancePercent >= 100)
-        {
-            _spawnChancePercent = 100;
-            return;
-        }
-
-        var targetActive = (int)Math.Ceiling(targetFraction * streamCount);
-        var deficit = targetActive - activeCount;
-        var headroomSpawn = Math.Min(100, (int)Math.Round(_baseSpawnChancePercent * EngineConstants.DensitySpawnHeadroom));
-
-        if (deficit < 0)
-        {
-            _spawnChancePercent = 0;
-            return;
-        }
-
-        if (deficit == 0)
-        {
-            _spawnChancePercent = _baseSpawnChancePercent;
-            return;
-        }
-
-        var inactive = streamCount - activeCount;
-        if (inactive <= 0)
-        {
-            _spawnChancePercent = 100;
-            return;
-        }
-
-        var neededPerFrame = deficit / (double)EngineConstants.DensityRecoveryFrames;
-        var adaptivePercent = (int)Math.Ceiling(neededPerFrame / inactive * 100);
-        _spawnChancePercent = Math.Min(100, Math.Max(headroomSpawn, adaptivePercent));
-    }
-
-    /// <summary>Per-frame spawn % so steady active fraction ≈ initial active chance (births = deaths).</summary>
-    private static int ComputeEquilibriumSpawnPercent(int activeChancePercent, int height)
-    {
-        if (activeChancePercent <= 0)
-            return 0;
-        if (activeChancePercent >= 100)
-            return 100;
-
-        var targetFraction = activeChancePercent / 100.0;
-        var avgLifetimeFrames = Math.Max(
-            1.0,
-            (EngineConstants.StreamLifetimeHeightFactor * height - 2) / EngineConstants.AvgFallSpeedCells);
-        var deathRate = 1.0 / avgLifetimeFrames;
-        var spawnFraction = targetFraction * deathRate / (1.0 - targetFraction);
-        return Math.Min(100, (int)Math.Round(spawnFraction * 100));
     }
 
     internal void Tick()
@@ -1790,19 +1685,8 @@ internal sealed class MatrixEngine : IDisposable
                 Resize(width, height);
         }
 
-        _spawnsThisFrame = 0;
-        RefreshAdaptiveSpawnChance();
-
-        // MaxSpawnsPerFrame is consumed in scan order, so a fixed left-to-right scan starves the right edge.
-        // Start each frame at a random column so every column gets the same chance at the spawn budget.
-        var start = _rng.Next(_width);
-        if (_wideColumns)
-            start &= ~1;
-        for (var i = 0; i < _width; i++)
+        for (var x = 0; x < _width; x++)
         {
-            var x = start + i;
-            if (x >= _width)
-                x -= _width;
             if (_wideColumns && (x & 1) == 1)
                 continue;
             UpdateColumn(x);
@@ -1819,17 +1703,6 @@ internal sealed class MatrixEngine : IDisposable
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int StreamIndex(int x, int slot) =>
         x * EngineConstants.MaxStreamsPerColumn + slot;
-
-    private bool IsColumnActive(int x)
-    {
-        for (var slot = 0; slot < EngineConstants.MaxStreamsPerColumn; slot++)
-        {
-            if (_columns[StreamIndex(x, slot)].Active)
-                return true;
-        }
-
-        return false;
-    }
 
     internal void Render(Stream stdout)
     {
@@ -1853,6 +1726,7 @@ internal sealed class MatrixEngine : IDisposable
         {
             ArrayPool<Cell>.Shared.Return(_grid);
             ArrayPool<ColumnState>.Shared.Return(_columns);
+            ArrayPool<int>.Shared.Return(_nextSpawnFrames);
         }
 
         _width = newWidth;
@@ -1860,51 +1734,77 @@ internal sealed class MatrixEngine : IDisposable
         _pendingResizeWidth = newWidth;
         _pendingResizeHeight = newHeight;
         _pendingResizeStable = EngineConstants.ResizeStableFrames;
-        UpdateDensityChances();
         _grid = ArrayPool<Cell>.Shared.Rent(_width * _height);
         _columns = ArrayPool<ColumnState>.Shared.Rent(_width * EngineConstants.MaxStreamsPerColumn);
+        _nextSpawnFrames = ArrayPool<int>.Shared.Rent(_width);
         Array.Clear(_grid, 0, _width * _height);
 
+        // Rain falls in from the top: each column's first stream enters within the first screen height of frames.
+        // A column starts in a gap with probability (1 - density), so the visible fraction is near the target from the start.
+        var (minTrail, maxTrail) = TrailLengthRange();
+        var avgTrail = (minTrail + maxTrail) / 2;
+        var typicalVisibleFrames = (StreamVisibleFrames(avgTrail, EngineConstants.MinSpeed) + StreamVisibleFrames(avgTrail, EngineConstants.MaxSpeed)) / 2;
         for (var x = 0; x < _width; x++)
         {
             for (var slot = 0; slot < EngineConstants.MaxStreamsPerColumn; slot++)
                 _columns[StreamIndex(x, slot)] = default;
-            if (IsStreamColumn(x) && RollPercent(_activeChancePercent))
-                ActivateColumn(x);
+            _nextSpawnFrames[x] = int.MaxValue;
+            if (!IsStreamColumn(x) || _effectiveDensity <= 0)
+                continue;
+            var entry = _rng.Next(1, _height + 1);
+            _nextSpawnFrames[x] = _rng.NextDouble() < _effectiveDensity
+                ? entry
+                : entry + Math.Max(0, NextGapFrames(typicalVisibleFrames));
         }
     }
 
+    /// <summary>Frames from the head entering row 0 until the trail tip leaves the bottom row.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private bool RollPercent(int chance) =>
-        chance >= 100 || (chance > 0 && _rng.Next(100) < chance);
+    private int StreamVisibleFrames(int trailLength, int speed) =>
+        (_height + trailLength - 2) / speed + 1;
+
+    /// <summary>
+    /// Frames between one stream leaving a column and the next entering it.
+    /// Density is the fraction of time a column shows a stream, so the mean gap is visible × (1 - density) / density;
+    /// gaps are uniform in [0, 2 × mean] so columns drift apart instead of moving in lockstep.
+    /// At density 1 the next stream enters one frame early so the column is never empty.
+    /// </summary>
+    private int NextGapFrames(int visibleFrames)
+    {
+        if (_effectiveDensity >= 1)
+            return -1;
+        var meanGap = visibleFrames * (1 - _effectiveDensity) / _effectiveDensity;
+        return (int)Math.Min(int.MaxValue / 4, Math.Round(_rng.NextDouble() * 2 * meanGap));
+    }
+
+    private (int Min, int Max) TrailLengthRange()
+    {
+        var minTrail = (int)Math.Round(Math.Max(EngineConstants.MinTrailCells, _height * EngineConstants.TrailMinHeightFraction));
+        var maxTrail = Math.Min(_height, (int)Math.Round(Math.Max(minTrail, _height * EngineConstants.TrailMaxHeightFraction)));
+        return (Math.Min(minTrail, maxTrail), maxTrail);
+    }
 
     private void UpdateColumn(int x)
     {
         ClearColumn(x);
 
-        var activeCount = 0;
-        var freeSlot = -1;
-        for (var slot = 0; slot < EngineConstants.MaxStreamsPerColumn; slot++)
+        if (IsStreamColumn(x) && --_nextSpawnFrames[x] <= 0)
         {
-            ref var stream = ref _columns[StreamIndex(x, slot)];
-            if (stream.Active)
-                activeCount++;
-            else if (freeSlot < 0)
-                freeSlot = slot;
-        }
+            var freeSlot = -1;
+            for (var slot = 0; slot < EngineConstants.MaxStreamsPerColumn; slot++)
+            {
+                if (!_columns[StreamIndex(x, slot)].Active)
+                {
+                    freeSlot = slot;
+                    break;
+                }
+            }
 
-        if (freeSlot >= 0 && _spawnsThisFrame < EngineConstants.MaxSpawnsPerFrame)
-        {
-            if (activeCount == 0 && RollPercent(_spawnChancePercent))
-            {
+            // Both slots busy: try again next frame.
+            if (freeSlot >= 0)
                 ActivateColumn(x, freeSlot);
-                _spawnsThisFrame++;
-            }
-            else if (activeCount > 0 && ShouldRecycleColumn(x) && RollPercent(_spawnChancePercent))
-            {
-                ActivateColumn(x, freeSlot, recycled: true);
-                _spawnsThisFrame++;
-            }
+            else
+                _nextSpawnFrames[x] = 0;
         }
 
         for (var slot = 0; slot < EngineConstants.MaxStreamsPerColumn; slot++)
@@ -2007,68 +1907,26 @@ internal sealed class MatrixEngine : IDisposable
         }
     }
 
-    private bool ShouldRecycleColumn(int x)
+    /// <summary>Start a stream whose head enters row 0 on this frame, and schedule the column's next stream.</summary>
+    private void ActivateColumn(int x, int slot)
     {
-        if (_height <= 0)
-            return false;
-
-        var visibleCells = 0;
-        var headY = int.MinValue;
-        for (var slot = 0; slot < EngineConstants.MaxStreamsPerColumn; slot++)
-        {
-            ref var column = ref _columns[StreamIndex(x, slot)];
-            if (!column.Active)
-                continue;
-
-            headY = Math.Max(headY, column.HeadY);
-            var trailTop = column.HeadY - column.TrailLength + 1;
-            var visibleStart = Math.Max(0, trailTop);
-            var visibleEnd = Math.Min(column.HeadY, _height - 1);
-            if (visibleEnd >= visibleStart)
-                visibleCells += visibleEnd - visibleStart + 1;
-        }
-
-        var recycleStart = (int)Math.Round(_height * EngineConstants.RecycleStartHeadFraction);
-        if (headY < recycleStart)
-            return false;
-
-        var visibleFraction = Math.Min(1.0, visibleCells / (double)_height);
-        var progress = Math.Clamp((headY - recycleStart) / (double)Math.Max(1, _height - recycleStart), 0.0, 1.0);
-
-        if (visibleFraction <= EngineConstants.RecycleSparseVisibleFraction)
-            return RollPercent((int)Math.Round(35 + progress * 50));
-
-        if (visibleFraction >= EngineConstants.RecycleDenseVisibleFraction && headY <= _height - 1)
-            return false;
-
-        var coverageDelay = Math.Clamp(
-            (visibleFraction - EngineConstants.RecycleSparseVisibleFraction) /
-            (EngineConstants.RecycleDenseVisibleFraction - EngineConstants.RecycleSparseVisibleFraction),
-            0.0,
-            1.0);
-        var chance = Math.Clamp((progress - coverageDelay * 0.45) * 60, 0, 65);
-        return RollPercent((int)Math.Round(chance));
-    }
-
-    private void ActivateColumn(int x, int slot = 0, bool recycled = false)
-    {
-        var minTrail = (int)Math.Round(
-            Math.Max(EngineConstants.MinTrailCells, _height * EngineConstants.TrailMinHeightFraction) * _trailLengthBoost);
-        var maxTrail = (int)Math.Round(
-            Math.Max(minTrail, _height * EngineConstants.TrailMaxHeightFraction) * _trailLengthBoost);
-        maxTrail = Math.Min(_height, maxTrail);
-        minTrail = Math.Min(minTrail, maxTrail);
+        var (minTrail, maxTrail) = TrailLengthRange();
         var speed = (byte)_rng.Next(EngineConstants.MinSpeed, EngineConstants.MaxSpeed + 1);
+        var trailLength = _rng.Next(minTrail, maxTrail + 1);
 
         _columns[StreamIndex(x, slot)] = new ColumnState
         {
             Active = true,
-            HeadY = -_rng.Next(0, Math.Max(1, recycled ? (int)Math.Round(_height * EngineConstants.RecycleInitialDelayHeightFraction) : _height)),
+            // UpdateStream advances the head before drawing, so it lands on row 0 this frame.
+            HeadY = -speed,
             Speed = speed,
-            TrailLength = _rng.Next(minTrail, maxTrail + 1),
+            TrailLength = trailLength,
             TimeOffset = RainBrightness.ColumnTimeOffset(x),
             SpeedOffset = RainBrightness.SpeedOffsetFromColumnSpeed(speed),
         };
+
+        var visibleFrames = StreamVisibleFrames(trailLength, speed);
+        _nextSpawnFrames[x] = visibleFrames + NextGapFrames(visibleFrames);
     }
 
     private void ClearColumn(int x)
@@ -2089,6 +1947,12 @@ internal sealed class MatrixEngine : IDisposable
         {
             ArrayPool<ColumnState>.Shared.Return(_columns);
             _columns = [];
+        }
+
+        if (_nextSpawnFrames.Length > 0)
+        {
+            ArrayPool<int>.Shared.Return(_nextSpawnFrames);
+            _nextSpawnFrames = [];
         }
 
         if (_renderBuffer.Length > 0)
