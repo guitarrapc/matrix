@@ -275,6 +275,7 @@ internal enum ColorPattern
     Rainbow,
     Fire,
     Cycle,
+    Pulse,
 }
 
 internal sealed class CliOptions
@@ -392,7 +393,7 @@ internal sealed class CliOptions
                     if (++i >= args.Length)
                         return Error("missing value for --pattern");
                     if (!TryParseColorPattern(args[i], out pattern))
-                        return Error("invalid --pattern value (expected classic, resurrections, operator, twilight, rain, rainbow, fire, or cycle)");
+                        return Error("invalid --pattern value (expected classic, resurrections, operator, twilight, rain, rainbow, fire, cycle, or pulse)");
                     break;
                 case "--density":
                     if (++i >= args.Length)
@@ -535,6 +536,12 @@ internal sealed class CliOptions
             return true;
         }
 
+        if (text.Equals("pulse", StringComparison.OrdinalIgnoreCase))
+        {
+            pattern = ColorPattern.Pulse;
+            return true;
+        }
+
         pattern = default;
         return false;
     }
@@ -594,7 +601,7 @@ internal readonly struct ColorOptions(
     private static ColorOptions Preset(ColorPattern pattern) =>
         pattern switch
         {
-            ColorPattern.Classic => Default,
+            ColorPattern.Classic or ColorPattern.Pulse => Default,
             ColorPattern.Resurrections => new ColorOptions(
                 pattern,
                 new ColorValue(new Rgb(1, 10, 2)),       // #010A02
@@ -1221,6 +1228,13 @@ internal sealed class AnsiPalette
     private readonly Rgb _cursorAddend;
     private readonly Rgb[]? _bandCursorAddends;
     private readonly BandLayout _bandLayout;
+    // Brightness multiplier per frame for one heartbeat, or null when the pattern does not pulse.
+    private readonly double[]? _pulseCurve;
+
+    // One heartbeat every 20 frames, about 1.4 seconds (a slow ~42 bpm) at the default 14 fps.
+    private const int PulseFrames = 20;
+    // Brightness between beats. Low enough that the beat reads clearly, high enough that rain stays visible.
+    private const double PulseRest = 0.55;
 
     // A cycle band moves one column-band to the right every this many frames.
     // 48 bands x 2 frames is one full hue loop in about 7 seconds at the default 14 fps.
@@ -1243,6 +1257,7 @@ internal sealed class AnsiPalette
         BrightnessPalette palette,
         BrightnessPalette[]? bandPalettes,
         BandLayout bandLayout,
+        double[]? pulseCurve,
         TerminalColorMode colorMode,
         Rgb cursorAddend,
         Rgb[]? bandCursorAddends)
@@ -1252,6 +1267,7 @@ internal sealed class AnsiPalette
         _palette = palette;
         _bandPalettes = bandPalettes;
         _bandLayout = bandLayout;
+        _pulseCurve = pulseCurve;
         _colorMode = colorMode;
         _cursorAddend = cursorAddend;
         _bandCursorAddends = bandCursorAddends;
@@ -1302,8 +1318,33 @@ internal sealed class AnsiPalette
             ColorPattern.Cycle => BandLayout.ScrollingColumns,
             _ => BandLayout.Columns,
         };
+        var pulseCurve = colors.Pattern == ColorPattern.Pulse ? CreatePulseCurve() : null;
         var cursorAddend = BrightnessPalette.ScaleRgb(palette.HeadColor, cursorIntensity);
-        return new AnsiPalette(bgPrefix, rowFgReset, palette, bandPalettes, bandLayout, colorMode, cursorAddend, bandCursorAddends);
+        return new AnsiPalette(bgPrefix, rowFgReset, palette, bandPalettes, bandLayout, pulseCurve, colorMode, cursorAddend, bandCursorAddends);
+    }
+
+    /// <summary>
+    /// A "lub-dub" heartbeat: a strong beat, a weaker second beat shortly after, then a long rest.
+    /// </summary>
+    private static double[] CreatePulseCurve()
+    {
+        var curve = new double[PulseFrames];
+        for (var i = 0; i < PulseFrames; i++)
+        {
+            var t = i / (double)PulseFrames;
+            var beat = Math.Max(Bump(t, 0.10), 0.6 * Bump(t, 0.30));
+            curve[i] = PulseRest + (1 - PulseRest) * beat;
+        }
+
+        return curve;
+
+        // Wide enough that each beat spans several frames even at low fps.
+        static double Bump(double t, double center)
+        {
+            const double Width = 0.06;
+            var d = (t - center) / Width;
+            return Math.Exp(-d * d);
+        }
     }
 
     /// <summary>
@@ -1517,6 +1558,10 @@ internal sealed class AnsiPalette
         AppendBytes(buffer, ref pos, _home);
         Span<byte> fgScratch = stackalloc byte[32];
 
+        // Pulse dims both the rain and the head bloom together, so heads do not stay lit between beats.
+        var pulse = _pulseCurve is null ? 1.0 : _pulseCurve[(int)(frameNumber % (ulong)_pulseCurve.Length)];
+        var frameCursorAddend = _pulseCurve is null ? _cursorAddend : BrightnessPalette.ScaleRgb(_cursorAddend, pulse);
+
         for (var y = 0; y < height; y++)
         {
             if (y > 0)
@@ -1553,11 +1598,11 @@ internal sealed class AnsiPalette
 
                 var brightness = cell.Brightness / 255.0;
                 brightness -= Dither(x, y, frameNumber) * (EngineConstants.DitherMagnitude / 3.0);
-                brightness = Math.Clamp(brightness, 0, 1);
+                brightness = Math.Clamp(brightness * pulse, 0, 1);
                 var palette = SelectPalette(x, y, width, height, frameNumber, out var band);
                 var rgb = palette.Sample((byte)(brightness * 255));
                 if (cell.CursorBoost != 0)
-                    rgb = BrightnessPalette.AddClamped(rgb, SelectCursorAddend(band));
+                    rgb = BrightnessPalette.AddClamped(rgb, SelectCursorAddend(band, frameCursorAddend));
 
                 if (_colorMode == TerminalColorMode.TrueColor)
                 {
@@ -1652,10 +1697,10 @@ internal sealed class AnsiPalette
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private Rgb SelectCursorAddend(int band) =>
+    private Rgb SelectCursorAddend(int band, Rgb frameCursorAddend) =>
         band >= 0 && _bandCursorAddends is not null
             ? _bandCursorAddends[band]
-            : _cursorAddend;
+            : frameCursorAddend;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void AppendBytes(byte[] buffer, ref int pos, ReadOnlySpan<byte> bytes)
@@ -2461,7 +2506,7 @@ Usage:
   matrix --mode kana
   matrix --density <0.0-1.0>
   matrix --fps <1-60>
-  matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow|fire|cycle>
+  matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow|fire|cycle|pulse>
   matrix --bg <color> --head <color> --bright <color> --dim <color>
   matrix --cursor-intensity <0.5-5.0>
   matrix --help
@@ -2506,6 +2551,8 @@ Colors:
                        Only --bg overrides this pattern.
                  cycle: a full hue wheel spread across the screen width that
                         keeps flowing to the right. Only --bg overrides this pattern.
+                 pulse: classic colors whose brightness beats like a slow heart.
+                        All color options override this pattern, so any color can pulse.
   Hex (#RGB or #RRGGBB) or 16-color names (black, green, darkgreen, ...).
   Defaults: --pattern classic --bg #000000 --head #FFFFFF --bright #30FF58 --dim #053D16
   --cursor-intensity  Head-cell bloom strength (additive --head). Default 2.5.
@@ -2525,6 +2572,7 @@ Examples:
   matrix --pattern rainbow --bg #050505
   matrix --pattern fire
   matrix --pattern cycle 0
+  matrix --pattern pulse --bright #FF3040 --dim #400008
   matrix --bright #0F0 --dim #080
 
 Press any key to exit early. Ctrl+C also exits cleanly.
