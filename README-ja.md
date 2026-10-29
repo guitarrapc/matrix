@@ -41,7 +41,7 @@ matrix --duration 0
 matrix --mode <ascii|movie|kana>
 
 # 組み込みのカラーパターンを選びます。
-matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
+matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow|fire|cycle|pulse|wave>
 
 # カスタム色には #RGB、#RRGGBB、または16色の色名を指定できます。
 # フォールバック順は hex True Color、近似16色パレット、色なし ASCII です。
@@ -60,7 +60,7 @@ matrix --char "λ"
 matrix [duration]
 matrix [--duration <seconds>] [--mode <ascii|movie|kana>] [--char <character>]
        [--density <0.0-1.0>] [--fps <1-60>]
-       [--pattern <classic|resurrections|operator|twilight|rain|rainbow>]
+       [--pattern <classic|resurrections|operator|twilight|rain|rainbow|fire|cycle|pulse|wave>]
        [--bg <color>] [--head <color>] [--bright <color>] [--dim <color>]
        [--cursor-intensity <0.5-5.0>]
        [--help] [--version]

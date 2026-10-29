@@ -273,6 +273,10 @@ internal enum ColorPattern
     Twilight,
     Rain,
     Rainbow,
+    Fire,
+    Cycle,
+    Pulse,
+    Wave,
 }
 
 internal sealed class CliOptions
@@ -390,7 +394,7 @@ internal sealed class CliOptions
                     if (++i >= args.Length)
                         return Error("missing value for --pattern");
                     if (!TryParseColorPattern(args[i], out pattern))
-                        return Error("invalid --pattern value (expected classic, resurrections, operator, twilight, rain, or rainbow)");
+                        return Error("invalid --pattern value (expected classic, resurrections, operator, twilight, rain, rainbow, fire, cycle, pulse, or wave)");
                     break;
                 case "--density":
                     if (++i >= args.Length)
@@ -521,6 +525,30 @@ internal sealed class CliOptions
             return true;
         }
 
+        if (text.Equals("fire", StringComparison.OrdinalIgnoreCase))
+        {
+            pattern = ColorPattern.Fire;
+            return true;
+        }
+
+        if (text.Equals("cycle", StringComparison.OrdinalIgnoreCase))
+        {
+            pattern = ColorPattern.Cycle;
+            return true;
+        }
+
+        if (text.Equals("pulse", StringComparison.OrdinalIgnoreCase))
+        {
+            pattern = ColorPattern.Pulse;
+            return true;
+        }
+
+        if (text.Equals("wave", StringComparison.OrdinalIgnoreCase))
+        {
+            pattern = ColorPattern.Wave;
+            return true;
+        }
+
         pattern = default;
         return false;
     }
@@ -556,7 +584,8 @@ internal readonly struct ColorOptions(
     internal static ColorOptions Create(ColorPattern pattern, ColorValue? bg, ColorValue? head, ColorValue? bright, ColorValue? dim)
     {
         var preset = Preset(pattern);
-        if (pattern == ColorPattern.Rainbow)
+        // Band patterns take rain colors from their band palettes, so only the background is overridable.
+        if (pattern is ColorPattern.Rainbow or ColorPattern.Fire or ColorPattern.Cycle)
         {
             return new ColorOptions(
                 pattern,
@@ -579,7 +608,7 @@ internal readonly struct ColorOptions(
     private static ColorOptions Preset(ColorPattern pattern) =>
         pattern switch
         {
-            ColorPattern.Classic => Default,
+            ColorPattern.Classic or ColorPattern.Pulse or ColorPattern.Wave => Default,
             ColorPattern.Resurrections => new ColorOptions(
                 pattern,
                 new ColorValue(new Rgb(1, 10, 2)),       // #010A02
@@ -606,12 +635,18 @@ internal readonly struct ColorOptions(
                 new ColorValue(new Rgb(53, 196, 226)),    // #35C4E2
                 new ColorValue(new Rgb(7, 45, 68)),       // #072D44
                 new ColorValue(new Rgb(188, 246, 255))),  // #BCF6FF
-            ColorPattern.Rainbow => new ColorOptions(
+            ColorPattern.Rainbow or ColorPattern.Cycle => new ColorOptions(
                 pattern,
                 DefaultBackground,
                 DefaultHead,
                 new ColorValue(new Rgb(255, 0, 0)),
                 new ColorValue(new Rgb(80, 0, 0))),
+            ColorPattern.Fire => new ColorOptions(
+                pattern,
+                new ColorValue(new Rgb(10, 2, 0)),        // #0A0200
+                new ColorValue(new Rgb(255, 138, 32)),    // #FF8A20
+                new ColorValue(new Rgb(255, 106, 0)),     // #FF6A00
+                new ColorValue(new Rgb(77, 32, 0))),      // #4D2000
             _ => Default,
         };
 }
@@ -1195,27 +1230,73 @@ internal sealed class AnsiPalette
     private readonly byte[] _rowFgReset;
     private readonly byte[] _space = " "u8.ToArray();
     private readonly BrightnessPalette _palette;
-    private readonly BrightnessPalette[]? _columnBandPalettes;
+    private readonly BrightnessPalette[]? _bandPalettes;
     private readonly TerminalColorMode _colorMode;
     private readonly Rgb _cursorAddend;
-    private readonly Rgb[]? _columnBandCursorAddends;
+    private readonly Rgb[]? _bandCursorAddends;
+    private readonly BandLayout _bandLayout;
+    // Brightness multiplier per frame for one heartbeat, or null when the pattern does not pulse.
+    private readonly double[]? _pulseCurve;
+
+    // One heartbeat every 20 frames, about 1.4 seconds (a slow ~42 bpm) at the default 14 fps.
+    private const int PulseFrames = 20;
+    // Brightness between beats. Low enough that the beat reads clearly, high enough that rain stays visible.
+    private const double PulseRest = 0.55;
+
+    // Whether a sine-shaped band of light sweeps across the rain (wave).
+    private readonly bool _wave;
+
+    // The crest moves one wavelength to the right every 42 frames, about 3 seconds at the default 14 fps.
+    private const int WaveFramesPerWavelength = 42;
+    // Two crests fit across the screen, but never shorter than this, so narrow terminals keep a gentle slope.
+    private const double WaveMinWavelength = 24;
+    // Crest height above or below the screen middle, as a fraction of screen height.
+    private const double WaveAmplitude = 0.25;
+    // Light band half-thickness as a fraction of screen height, at least WaveMinThickness rows.
+    private const double WaveThickness = 0.08;
+    private const double WaveMinThickness = 1.5;
+    // Off the crest the rain dims to WaveRest. On the crest it is pushed past normal brightness to WavePeak,
+    // so the faint trail cells the band passes through light up too.
+    private const double WaveRest = 0.5;
+    private const double WavePeak = 1.3;
+
+    // A cycle band moves one column-band to the right every this many frames.
+    // 48 bands x 2 frames is one full hue loop in about 7 seconds at the default 14 fps.
+    private const int CycleBandCount = 48;
+    private const int CycleFramesPerBand = 2;
+
+    private enum BandLayout
+    {
+        /// <summary>Bands split the screen into columns (rainbow).</summary>
+        Columns,
+        /// <summary>Bands split the screen into rows (fire).</summary>
+        Rows,
+        /// <summary>Column bands that shift right as frames advance (cycle).</summary>
+        ScrollingColumns,
+    }
 
     private AnsiPalette(
         byte[] bgRowPrefix,
         byte[] rowFgReset,
         BrightnessPalette palette,
-        BrightnessPalette[]? columnBandPalettes,
+        BrightnessPalette[]? bandPalettes,
+        BandLayout bandLayout,
+        double[]? pulseCurve,
+        bool wave,
         TerminalColorMode colorMode,
         Rgb cursorAddend,
-        Rgb[]? columnBandCursorAddends)
+        Rgb[]? bandCursorAddends)
     {
         _bgRowPrefix = bgRowPrefix;
         _rowFgReset = rowFgReset;
         _palette = palette;
-        _columnBandPalettes = columnBandPalettes;
+        _bandPalettes = bandPalettes;
+        _bandLayout = bandLayout;
+        _pulseCurve = pulseCurve;
+        _wave = wave;
         _colorMode = colorMode;
         _cursorAddend = cursorAddend;
-        _columnBandCursorAddends = columnBandCursorAddends;
+        _bandCursorAddends = bandCursorAddends;
     }
 
     internal static AnsiPalette Create(ColorOptions colors, TerminalColorMode colorMode, double cursorIntensity)
@@ -1242,18 +1323,155 @@ internal sealed class AnsiPalette
             _ => [],
         };
 
-        BrightnessPalette[]? columnBandPalettes = null;
-        Rgb[]? columnBandCursorAddends = null;
-        if (colors.Pattern == ColorPattern.Rainbow)
+        var bandPalettes = colors.Pattern switch
         {
-            columnBandPalettes = CreateRainbowPalettes(bgRgb);
-            columnBandCursorAddends = new Rgb[columnBandPalettes.Length];
-            for (var i = 0; i < columnBandPalettes.Length; i++)
-                columnBandCursorAddends[i] = BrightnessPalette.ScaleRgb(columnBandPalettes[i].HeadColor, cursorIntensity);
+            ColorPattern.Rainbow => CreateRainbowPalettes(bgRgb),
+            ColorPattern.Fire => CreateFirePalettes(bgRgb),
+            ColorPattern.Cycle => CreateCyclePalettes(bgRgb),
+            _ => null,
+        };
+        Rgb[]? bandCursorAddends = null;
+        if (bandPalettes is not null)
+        {
+            bandCursorAddends = new Rgb[bandPalettes.Length];
+            for (var i = 0; i < bandPalettes.Length; i++)
+                bandCursorAddends[i] = BrightnessPalette.ScaleRgb(bandPalettes[i].HeadColor, cursorIntensity);
         }
 
+        var bandLayout = colors.Pattern switch
+        {
+            ColorPattern.Fire => BandLayout.Rows,
+            ColorPattern.Cycle => BandLayout.ScrollingColumns,
+            _ => BandLayout.Columns,
+        };
+        var pulseCurve = colors.Pattern == ColorPattern.Pulse ? CreatePulseCurve() : null;
         var cursorAddend = BrightnessPalette.ScaleRgb(palette.HeadColor, cursorIntensity);
-        return new AnsiPalette(bgPrefix, rowFgReset, palette, columnBandPalettes, colorMode, cursorAddend, columnBandCursorAddends);
+        var wave = colors.Pattern == ColorPattern.Wave;
+        return new AnsiPalette(bgPrefix, rowFgReset, palette, bandPalettes, bandLayout, pulseCurve, wave, colorMode, cursorAddend, bandCursorAddends);
+    }
+
+    /// <summary>
+    /// Brightness multiplier at a cell for the wave pattern: high near a sine curve that travels right, low elsewhere.
+    /// Cheap enough per cell next to <see cref="Dither"/>, which already calls Math.Sin per cell.
+    /// </summary>
+    private static double WaveGain(int x, int y, int width, int height, ulong frameNumber)
+    {
+        var wavelength = Math.Max(WaveMinWavelength, width / 2.0);
+        var travel = (frameNumber % WaveFramesPerWavelength) / (double)WaveFramesPerWavelength;
+        // Subtracting travel moves the crest toward larger x as frames advance.
+        var phase = 2 * Math.PI * (x / wavelength - travel);
+        var crest = (height - 1) * 0.5 + height * WaveAmplitude * Math.Sin(phase);
+        var thickness = Math.Max(WaveMinThickness, height * WaveThickness);
+        var d = (y - crest) / thickness;
+        return WaveRest + (WavePeak - WaveRest) * Math.Exp(-d * d);
+    }
+
+    /// <summary>
+    /// A "lub-dub" heartbeat: a strong beat, a weaker second beat shortly after, then a long rest.
+    /// </summary>
+    private static double[] CreatePulseCurve()
+    {
+        var curve = new double[PulseFrames];
+        for (var i = 0; i < PulseFrames; i++)
+        {
+            var t = i / (double)PulseFrames;
+            var beat = Math.Max(Bump(t, 0.10), 0.6 * Bump(t, 0.30));
+            curve[i] = PulseRest + (1 - PulseRest) * beat;
+        }
+
+        return curve;
+
+        // Wide enough that each beat spans several frames even at low fps.
+        static double Bump(double t, double center)
+        {
+            const double Width = 0.06;
+            var d = (t - center) / Width;
+            return Math.Exp(-d * d);
+        }
+    }
+
+    /// <summary>
+    /// Evenly spaced hues around the color wheel. One full loop spans the screen width,
+    /// so every hue is on screen at once while the bands scroll.
+    /// </summary>
+    private static BrightnessPalette[] CreateCyclePalettes(Rgb bg)
+    {
+        var palettes = new BrightnessPalette[CycleBandCount];
+        for (var i = 0; i < CycleBandCount; i++)
+        {
+            var bright = HueToRgb(i / (double)CycleBandCount);
+            palettes[i] = new BrightnessPalette(
+                new Rgb(255, 255, 255),
+                bright,
+                BrightnessPalette.ScaleRgb(bright, 0.24),
+                bg);
+        }
+
+        return palettes;
+
+        // HSV with full value and slightly reduced saturation, so blue stays bright enough to read.
+        static Rgb HueToRgb(double hue)
+        {
+            const double Saturation = 0.85;
+            var h = hue * 6;
+            var f = h - Math.Floor(h);
+            var low = 1 - Saturation;
+            var falling = 1 - Saturation * f;
+            var rising = 1 - Saturation * (1 - f);
+            var (r, g, b) = (int)h switch
+            {
+                0 => (1.0, rising, low),
+                1 => (falling, 1.0, low),
+                2 => (low, 1.0, rising),
+                3 => (low, falling, 1.0),
+                4 => (rising, low, 1.0),
+                _ => (1.0, low, falling),
+            };
+            return new Rgb((byte)Math.Round(r * 255), (byte)Math.Round(g * 255), (byte)Math.Round(b * 255));
+        }
+    }
+
+    /// <summary>
+    /// Row bands from deep red at the top to yellow-white at the bottom, so rain heats up as it falls.
+    /// Many thin bands keep the gradient smooth without rebuilding palettes when the terminal resizes.
+    /// </summary>
+    private static BrightnessPalette[] CreateFirePalettes(Rgb bg)
+    {
+        const int BandCount = 32;
+        ReadOnlySpan<(double t, Rgb head, Rgb bright, Rgb hot)> stops =
+        [
+            (0.00, new Rgb(160, 24, 0), new Rgb(122, 8, 0), new Rgb(192, 32, 0)),       // #7A0800 embers
+            (0.35, new Rgb(255, 58, 0), new Rgb(216, 30, 0), new Rgb(255, 90, 16)),     // #D81E00 red flame
+            (0.65, new Rgb(255, 138, 32), new Rgb(255, 106, 0), new Rgb(255, 168, 48)), // #FF6A00 orange flame
+            (1.00, new Rgb(255, 232, 160), new Rgb(255, 192, 32), new Rgb(255, 242, 176)), // #FFC020 flame core
+        ];
+
+        var palettes = new BrightnessPalette[BandCount];
+        for (var i = 0; i < BandCount; i++)
+        {
+            var t = i / (double)(BandCount - 1);
+            var s = 0;
+            while (s < stops.Length - 2 && t > stops[s + 1].t)
+                s++;
+            var (t0, head0, bright0, hot0) = stops[s];
+            var (t1, head1, bright1, hot1) = stops[s + 1];
+            var u = (t - t0) / (t1 - t0);
+            var bright = Lerp(bright0, bright1, u);
+            palettes[i] = new BrightnessPalette(
+                Lerp(head0, head1, u),
+                bright,
+                BrightnessPalette.ScaleRgb(bright, 0.3),
+                bg,
+                Lerp(hot0, hot1, u));
+        }
+
+        return palettes;
+
+        static Rgb Lerp(Rgb a, Rgb b, double u) =>
+            new(
+                (byte)Math.Round(a.R + (b.R - a.R) * u),
+                (byte)Math.Round(a.G + (b.G - a.G) * u),
+                (byte)Math.Round(a.B + (b.B - a.B) * u));
     }
 
     private static BrightnessPalette[] CreateRainbowPalettes(Rgb bg)
@@ -1383,6 +1601,10 @@ internal sealed class AnsiPalette
         AppendBytes(buffer, ref pos, _home);
         Span<byte> fgScratch = stackalloc byte[32];
 
+        // Pulse dims both the rain and the head bloom together, so heads do not stay lit between beats.
+        var pulse = _pulseCurve is null ? 1.0 : _pulseCurve[(int)(frameNumber % (ulong)_pulseCurve.Length)];
+        var frameCursorAddend = _pulseCurve is null ? _cursorAddend : BrightnessPalette.ScaleRgb(_cursorAddend, pulse);
+
         for (var y = 0; y < height; y++)
         {
             if (y > 0)
@@ -1419,11 +1641,18 @@ internal sealed class AnsiPalette
 
                 var brightness = cell.Brightness / 255.0;
                 brightness -= Dither(x, y, frameNumber) * (EngineConstants.DitherMagnitude / 3.0);
-                brightness = Math.Clamp(brightness, 0, 1);
-                var palette = SelectPalette(x, width, out var band);
+                var gain = _wave ? pulse * WaveGain(x, y, width, height, frameNumber) : pulse;
+                brightness = Math.Clamp(brightness * gain, 0, 1);
+                var palette = SelectPalette(x, y, width, height, frameNumber, out var band);
                 var rgb = palette.Sample((byte)(brightness * 255));
                 if (cell.CursorBoost != 0)
-                    rgb = BrightnessPalette.AddClamped(rgb, SelectCursorAddend(band));
+                {
+                    var cursorAddend = SelectCursorAddend(band, frameCursorAddend);
+                    // Heads off the crest dim with the rain. On the crest they keep their normal bloom.
+                    if (_wave)
+                        cursorAddend = BrightnessPalette.ScaleRgb(cursorAddend, Math.Min(1, gain));
+                    rgb = BrightnessPalette.AddClamped(rgb, cursorAddend);
+                }
 
                 if (_colorMode == TerminalColorMode.TrueColor)
                 {
@@ -1496,23 +1725,32 @@ internal sealed class AnsiPalette
     };
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private BrightnessPalette SelectPalette(int x, int width, out int band)
+    private BrightnessPalette SelectPalette(int x, int y, int width, int height, ulong frameNumber, out int band)
     {
-        if (_columnBandPalettes is null)
+        if (_bandPalettes is null)
         {
             band = -1;
             return _palette;
         }
 
-        band = Math.Min(_columnBandPalettes.Length - 1, x * _columnBandPalettes.Length / Math.Max(1, width));
-        return _columnBandPalettes[band];
+        var count = _bandPalettes.Length;
+        var (position, extent) = _bandLayout == BandLayout.Rows ? (y, height) : (x, width);
+        band = Math.Min(count - 1, position * count / Math.Max(1, extent));
+        if (_bandLayout == BandLayout.ScrollingColumns)
+        {
+            // Subtract the shift so each color moves right over time.
+            var shift = (int)(frameNumber / CycleFramesPerBand % (ulong)count);
+            band = (band - shift + count) % count;
+        }
+
+        return _bandPalettes[band];
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private Rgb SelectCursorAddend(int band) =>
-        band >= 0 && _columnBandCursorAddends is not null
-            ? _columnBandCursorAddends[band]
-            : _cursorAddend;
+    private Rgb SelectCursorAddend(int band, Rgb frameCursorAddend) =>
+        band >= 0 && _bandCursorAddends is not null
+            ? _bandCursorAddends[band]
+            : frameCursorAddend;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void AppendBytes(byte[] buffer, ref int pos, ReadOnlySpan<byte> bytes)
@@ -2318,7 +2556,7 @@ Usage:
   matrix --mode kana
   matrix --density <0.0-1.0>
   matrix --fps <1-60>
-  matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
+  matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow|fire|cycle|pulse|wave>
   matrix --bg <color> --head <color> --bright <color> --dim <color>
   matrix --cursor-intensity <0.5-5.0>
   matrix --help
@@ -2358,6 +2596,15 @@ Colors:
                  rainbow: seven vertical color bands from left to right
                           (red, orange, yellow, green, blue, indigo, violet).
                           Only --bg overrides this pattern.
+                 fire: horizontal color bands from deep red at the top to
+                       yellow at the bottom, so rain heats up as it falls.
+                       Only --bg overrides this pattern.
+                 cycle: a full hue wheel spread across the screen width that
+                        keeps flowing to the right. Only --bg overrides this pattern.
+                 pulse: classic colors whose brightness beats like a slow heart.
+                        All color options override this pattern, so any color can pulse.
+                 wave: classic colors with a sine-shaped band of light sweeping
+                       right through the rain. All color options override this pattern.
   Hex (#RGB or #RRGGBB) or 16-color names (black, green, darkgreen, ...).
   Defaults: --pattern classic --bg #000000 --head #FFFFFF --bright #30FF58 --dim #053D16
   --cursor-intensity  Head-cell bloom strength (additive --head). Default 2.5.
@@ -2375,6 +2622,10 @@ Examples:
   matrix --pattern resurrections
   matrix --pattern rain
   matrix --pattern rainbow --bg #050505
+  matrix --pattern fire
+  matrix --pattern cycle 0
+  matrix --pattern pulse --bright #FF3040 --dim #400008
+  matrix --pattern wave --density 0.8 0
   matrix --bright #0F0 --dim #080
 
 Press any key to exit early. Ctrl+C also exits cleanly.
