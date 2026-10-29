@@ -1179,6 +1179,19 @@ internal sealed class BrightnessPalette
 
     internal Rgb Sample(byte brightnessIndex) => _lut[brightnessIndex];
 
+    // Nearest 16-color name of each LUT entry, built only for 16-color output.
+    private ConsoleColor16[]? _namedLut;
+
+    /// <summary>Precomputes the nearest 16-color name of every LUT entry, so 16-color frames skip the per-cell search.</summary>
+    internal void BuildNamedLut()
+    {
+        _namedLut = new ConsoleColor16[_lut.Length];
+        for (var i = 0; i < _lut.Length; i++)
+            _namedLut[i] = ColorParser.NearestNamed(_lut[i]);
+    }
+
+    internal ConsoleColor16 SampleNamed(byte brightnessIndex) => _namedLut![brightnessIndex];
+
     private static void BuildLut(Span<Rgb> lut, Rgb bright, Rgb dim, Rgb bg, Rgb? hot)
     {
         var vividBright = ScaleRgb(bright, EngineConstants.LutBrightScale);
@@ -1278,6 +1291,8 @@ internal sealed class AnsiPalette
 
     // Whether a sine-shaped band of light sweeps across the rain (wave).
     private readonly bool _wave;
+    // Wave crest row per column for the frame being written, sized to the widest grid seen.
+    private double[] _waveCrests = [];
 
     // The crest moves one wavelength to the right every 42 frames, about 3 seconds at the default 14 fps.
     private const int WaveFramesPerWavelength = 42;
@@ -1292,6 +1307,9 @@ internal sealed class AnsiPalette
     // so the faint trail cells the band passes through light up too.
     private const double WaveRest = 0.5;
     private const double WavePeak = 1.3;
+    // Squared crest distance past which the crest term is below half an ulp of WaveRest:
+    // 0.8 * exp(-38) is about 2.5e-17, half an ulp of 0.5 is about 5.6e-17. Recheck if WaveRest or WavePeak change.
+    private const double WaveExpCutoff = 38;
 
     // A cycle band moves one column-band to the right every this many frames.
     // 48 bands x 2 frames is one full hue loop in about 7 seconds at the default 14 fps.
@@ -1388,6 +1406,16 @@ internal sealed class AnsiPalette
                 bandCursorAddends[i] = BrightnessPalette.ScaleRgb(bandPalettes[i].HeadColor, cursorIntensity);
         }
 
+        if (colorMode == TerminalColorMode.Ansi16)
+        {
+            palette.BuildNamedLut();
+            if (bandPalettes is not null)
+            {
+                foreach (var bandPalette in bandPalettes)
+                    bandPalette.BuildNamedLut();
+            }
+        }
+
         var bandLayout = colors.Pattern switch
         {
             ColorPattern.Fire => BandLayout.Rows,
@@ -1401,19 +1429,35 @@ internal sealed class AnsiPalette
     }
 
     /// <summary>
-    /// Brightness multiplier at a cell for the wave pattern: high near a sine curve that travels right, low elsewhere.
-    /// Calls Math.Sin and Math.Exp per cell, so wave renders slower than the other patterns.
+    /// Fills the crest row of each column for this frame: a sine curve that travels right.
+    /// The crest depends only on the column, so Math.Sin runs once per column instead of once per cell.
+    /// Returns the light band half-thickness.
     /// </summary>
-    private static double WaveGain(int x, int y, int width, int height, ulong frameNumber)
+    private double PrepareWaveCrests(int width, int height, ulong frameNumber)
     {
+        if (_waveCrests.Length < width)
+            _waveCrests = new double[width];
+
         var wavelength = Math.Max(WaveMinWavelength, width / 2.0);
         var travel = (frameNumber % WaveFramesPerWavelength) / (double)WaveFramesPerWavelength;
-        // Subtracting travel moves the crest toward larger x as frames advance.
-        var phase = 2 * Math.PI * (x / wavelength - travel);
-        var crest = (height - 1) * 0.5 + height * WaveAmplitude * Math.Sin(phase);
-        var thickness = Math.Max(WaveMinThickness, height * WaveThickness);
+        for (var x = 0; x < width; x++)
+        {
+            // Subtracting travel moves the crest toward larger x as frames advance.
+            var phase = 2 * Math.PI * (x / wavelength - travel);
+            _waveCrests[x] = (height - 1) * 0.5 + height * WaveAmplitude * Math.Sin(phase);
+        }
+
+        return Math.Max(WaveMinThickness, height * WaveThickness);
+    }
+
+    /// <summary>Brightness multiplier at a cell for the wave pattern: high near the crest, low elsewhere.</summary>
+    private static double WaveGain(int y, double crest, double thickness)
+    {
         var d = (y - crest) / thickness;
-        return WaveRest + (WavePeak - WaveRest) * Math.Exp(-d * d);
+        var d2 = d * d;
+        // Past this distance (WavePeak - WaveRest) * exp(-d2) is under half an ulp of WaveRest,
+        // so adding it changes no bit and Math.Exp can be skipped.
+        return d2 > WaveExpCutoff ? WaveRest : WaveRest + (WavePeak - WaveRest) * Math.Exp(-d2);
     }
 
     /// <summary>
@@ -1671,6 +1715,7 @@ internal sealed class AnsiPalette
         // Pulse dims both the rain and the head bloom together, so heads do not stay lit between beats.
         var pulse = _pulseCurve is null ? 1.0 : _pulseCurve[(int)(frameNumber % (ulong)_pulseCurve.Length)];
         var frameCursorAddend = _pulseCurve is null ? _cursorAddend : BrightnessPalette.ScaleRgb(_cursorAddend, pulse);
+        var waveThickness = _wave ? PrepareWaveCrests(width, height, frameNumber) : 0;
 
         for (var y = 0; y < height; y++)
         {
@@ -1681,8 +1726,8 @@ internal sealed class AnsiPalette
             AppendBytes(buffer, ref pos, _rowFgReset);
 
             var row = y * width;
-            Rgb lastFgRgb = default;
-            var hasLastFgRgb = false;
+            // Foreground last written in this row: packed RGB for true color, the 16-color name for 16 colors, -1 for none.
+            var lastFg = -1;
 
             for (var x = 0; x < width; x++)
             {
@@ -1708,10 +1753,11 @@ internal sealed class AnsiPalette
 
                 var brightness = cell.Brightness / 255.0;
                 brightness -= Dither(x, y, frameNumber) * (EngineConstants.DitherMagnitude / 3.0);
-                var gain = _wave ? pulse * WaveGain(x, y, width, height, frameNumber) : pulse;
+                var gain = _wave ? pulse * WaveGain(y, _waveCrests[x], waveThickness) : pulse;
                 brightness = Math.Clamp(brightness * gain, 0, 1);
                 var palette = SelectPalette(x, y, width, height, frameNumber, out var band);
-                var rgb = palette.Sample((byte)(brightness * 255));
+                var lutIndex = (byte)(brightness * 255);
+                var rgb = palette.Sample(lutIndex);
                 if (cell.CursorBoost != 0)
                 {
                     var cursorAddend = SelectCursorAddend(band, frameCursorAddend);
@@ -1723,23 +1769,24 @@ internal sealed class AnsiPalette
 
                 if (_colorMode == TerminalColorMode.TrueColor)
                 {
-                    if (!hasLastFgRgb || rgb.R != lastFgRgb.R || rgb.G != lastFgRgb.G || rgb.B != lastFgRgb.B)
+                    var fg = (rgb.R << 16) | (rgb.G << 8) | rgb.B;
+                    if (fg != lastFg)
                     {
                         WriteTrueColorSequence(fgScratch, isBackground: false, rgb, out var fgLen);
                         AppendBytes(buffer, ref pos, fgScratch[..fgLen]);
-                        lastFgRgb = rgb;
-                        hasLastFgRgb = true;
+                        lastFg = fg;
                     }
                 }
                 else if (_colorMode == TerminalColorMode.Ansi16)
                 {
-                    if (!hasLastFgRgb || rgb.R != lastFgRgb.R || rgb.G != lastFgRgb.G || rgb.B != lastFgRgb.B)
+                    // Many RGB values map to one 16-color name, so dedupe on the name. Only heads add the
+                    // cursor bloom on top of the LUT color, so only they need the live nearest-color search.
+                    var named = cell.CursorBoost != 0 ? ColorParser.NearestNamed(rgb) : palette.SampleNamed(lutIndex);
+                    if ((int)named != lastFg)
                     {
-                        var fgCode = Ansi16FgCode(ColorParser.NearestNamed(rgb));
-                        WriteAnsi16Sequence(fgScratch, fgCode, out var fgLen);
+                        WriteAnsi16Sequence(fgScratch, Ansi16FgCode(named), out var fgLen);
                         AppendBytes(buffer, ref pos, fgScratch[..fgLen]);
-                        lastFgRgb = rgb;
-                        hasLastFgRgb = true;
+                        lastFg = (int)named;
                     }
                 }
 
