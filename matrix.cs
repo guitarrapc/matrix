@@ -62,6 +62,27 @@ else if (colorMode == TerminalColorMode.None)
     Console.Error.WriteLine("warning: ANSI color not supported; falling back to colorless ASCII output");
 }
 
+if (options.Mode == GlyphMode.Real)
+{
+    // Only a warning: some terminals draw soft fonts without listing them (older Windows Terminal replies "?1;0c").
+    if (Console.IsInputRedirected)
+    {
+        Console.Error.WriteLine("warning: stdin is not a tty; cannot check soft font support for real mode");
+    }
+    else if (TerminalCapabilities.IsBehindOtherPseudoConsoleHost())
+    {
+        Console.Error.WriteLine("warning: the Windows console host answers terminal queries for this terminal, so soft font (DECDLD) support cannot be checked; real mode glyphs may show as ASCII");
+    }
+    else
+    {
+        var softFont = TerminalCapabilities.QuerySoftFontSupport();
+        if (softFont is null)
+            Console.Error.WriteLine("warning: terminal did not answer the device attributes query; real mode glyphs may show as ASCII");
+        else if (softFont == false)
+            Console.Error.WriteLine("warning: terminal does not report soft font (DECDLD) support; real mode glyphs may show as ASCII");
+    }
+}
+
 var cursorIntensity = options.CursorIntensity;
 
 var keyExitEnabled = !Console.IsInputRedirected;
@@ -792,6 +813,133 @@ internal static class TerminalCapabilities
         return false;
     }
 
+    /// <summary>
+    /// Asks the terminal for its attributes (DA1, <c>CSI c</c>) and reports whether attribute 7
+    /// (soft character sets, DECDLD) is listed. Returns null when the terminal does not answer in time.
+    /// </summary>
+    internal static bool? QuerySoftFontSupport(int timeoutMs = 1000)
+    {
+        Span<char> response = stackalloc char[128];
+        var length = 0;
+        Action restore;
+        if (OperatingSystem.IsWindows())
+        {
+            if (!TryEnableWindowsVtInput(out restore))
+                return null;
+        }
+        else if (!NativeTermios.TryEnableRawMode(out restore))
+        {
+            return null;
+        }
+
+        try
+        {
+            Console.Out.Write("\u001b[c");
+            Console.Out.Flush();
+
+            Span<byte> bytes = stackalloc byte[64];
+            var deadline = Stopwatch.GetTimestamp() + timeoutMs * Stopwatch.Frequency / 1000;
+            while (Stopwatch.GetTimestamp() < deadline && length < response.Length)
+            {
+                var gotInput = false;
+                if (OperatingSystem.IsWindows())
+                {
+                    while (Console.KeyAvailable && length < response.Length)
+                    {
+                        response[length++] = Console.ReadKey(intercept: true).KeyChar;
+                        gotInput = true;
+                    }
+                }
+                else if (NativeTermios.TryReadInput(bytes, out var read))
+                {
+                    for (var i = 0; i < read && length < response.Length; i++)
+                        response[length++] = (char)bytes[i];
+                    gotInput = true;
+                }
+
+                if (gotInput && TryParseDeviceAttributes(response[..length], out var softFont))
+                    return softFont;
+                if (!gotInput)
+                    Thread.Sleep(5);
+            }
+
+            return null;
+        }
+        finally
+        {
+            restore();
+        }
+    }
+
+    /// <summary>
+    /// Parses a DA1 reply such as <c>ESC [ ? 61 ; 6 ; 7 ; 22 c</c>. Attribute 7 means soft character sets;
+    /// attributes are only defined for the VT200-and-later classes (first parameter 61-69).
+    /// </summary>
+    internal static bool TryParseDeviceAttributes(ReadOnlySpan<char> text, out bool softFont)
+    {
+        softFont = false;
+        var start = text.IndexOf("\u001b[?".AsSpan());
+        if (start < 0)
+            return false;
+
+        var body = text[(start + 3)..];
+        var end = body.IndexOf('c');
+        if (end < 0)
+            return false;
+
+        body = body[..end];
+        var index = 0;
+        var isVt200Class = false;
+        foreach (var range in body.Split(';'))
+        {
+            if (!int.TryParse(body[range], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value))
+                return false;
+            if (index == 0)
+                isVt200Class = value is >= 61 and <= 69;
+            else if (isVt200Class && value == 7)
+                softFont = true;
+            index++;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// True when a terminal other than Windows Terminal hosts this process through ConPTY (VS Code and
+    /// other xterm.js hosts, for example). conhost sits in between and answers DA1 with its own attributes,
+    /// which list soft fonts even when the hosting terminal cannot draw them. Under ConPTY the console
+    /// window is a hidden pseudo window; a classic conhost window is visible and draws soft fonts itself.
+    /// </summary>
+    internal static bool IsBehindOtherPseudoConsoleHost()
+    {
+        if (!OperatingSystem.IsWindows())
+            return false;
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_SESSION")))
+            return false;
+
+        var window = GetConsoleWindow();
+        return window == IntPtr.Zero || !IsWindowVisible(window);
+    }
+
+    private static bool TryEnableWindowsVtInput(out Action restore)
+    {
+        restore = static () => { };
+        var handle = GetStdHandle(-10);
+        if (handle == IntPtr.Zero || handle == new IntPtr(-1) || !GetConsoleMode(handle, out var original))
+            return false;
+
+        // VT input delivers the terminal's reply as input; line input and echo would hold it back or print it.
+        const uint enableEchoInput = 0x0004;
+        const uint enableLineInput = 0x0002;
+        const uint enableVtInput = 0x0200;
+        var mode = (original | enableVtInput) & ~(enableEchoInput | enableLineInput);
+        if (!SetConsoleMode(handle, mode))
+            return false;
+
+        restore = () => SetConsoleMode(handle, original);
+        return true;
+    }
+
     private static bool HasTrueColorEnv(string? colorTerm)
     {
         if (string.IsNullOrEmpty(colorTerm))
@@ -808,6 +956,12 @@ internal static class TerminalCapabilities
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetConsoleWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
 }
 
 /// <summary>

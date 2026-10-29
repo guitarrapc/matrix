@@ -36,7 +36,7 @@ matrix 0
 matrix --duration 0
 
 # ASCII グリフ、映画風の全角グリフ、またはソフトフォントで描く映画のグリフを使います。デフォルトは ascii です。
-# real にはソフトフォント (DECDLD) 対応の端末 (Windows Terminal など) が必要です。非対応の端末では ASCII がそのまま表示されます。
+# real にはソフトフォント (DECDLD) 対応の端末 (Windows Terminal など) が必要です。非対応の端末では警告を出し、ASCII がそのまま表示されます。
 matrix --mode <ascii|movie|real>
 
 # 組み込みのカラーパターンを選びます。

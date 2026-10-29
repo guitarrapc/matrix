@@ -105,7 +105,9 @@ Every movie glyph stays within **U+3000-U+30FF** (see Lessons Learned: movie mod
 - Streams emit ASCII codes `0x21` and up; the terminal draws each code with its soft-font glyph. SGR colors apply as usual, so every color pattern works.
 - 55 glyphs, each a 12 x 24 one-bit bitmap embedded in the binary. They are rasterized from `Matrix-Code.ttf` by Rezmason (MIT License, see `THIRD_PARTY_NOTICES.md`).
 - Glyphs are 1 cell wide, so real mode uses every column like ascii-matrix and needs no UTF-8.
-- Requires soft font support: Windows Terminal, xterm with a VT340 terminal ID, mlterm, and RLogin. Terminals without it (iTerm2, kitty, Alacritty, GNOME Terminal, macOS Terminal) show the plain ASCII codes instead. Terminal support is not detected yet.
+- Requires soft font support: Windows Terminal, xterm with a VT340 terminal ID, mlterm, and RLogin. Terminals without it (iTerm2, kitty, Alacritty, GNOME Terminal, macOS Terminal) show the plain ASCII codes instead.
+- At startup the terminal is asked for its attributes (DA1). When it does not list soft fonts (attribute 7), does not answer within 1 second, or cannot be asked, a warning goes to stderr and the rain still runs. It is only a warning because some terminals draw soft fonts without listing them (older Windows Terminal replies `?1;0c`).
+- On Windows, DA1 is trusted only in Windows Terminal (`WT_SESSION`) and in a classic console window. Other terminals that host the program through ConPTY get a warning without a query (see Lessons Learned: real mode terminal detection).
 - Fails when the console cannot enable VT processing.
 
 ---
@@ -230,6 +232,12 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 - **Rejected:** drawing the screen as images (Sixel, kitty graphics) or as braille or block pixel art. Images are heavy at 14-60 FPS, and pixel art needs 2-3 cells per glyph.
 - **Decision:** DECDLD soft font. It is a VT220-era standard, supported by Windows Terminal, and the output stays ASCII.
 - **Glyph scaling:** `Matrix-Code.ttf` glyphs are about as wide as they are tall. Scaling them uniformly into a 12 x 24 cell left them 8 pixels tall, so width and height are scaled separately to a 10 x 16 box. The box size comes from the katakana only; the vertical bar and `¦` are taller and would shrink every glyph.
+
+### real mode terminal detection
+
+- **Symptom:** in the Claude desktop terminal panel (xterm.js, `TERM_PROGRAM=claude-desktop`), DA1 replied `?61;6;7;21;22;23;24;28;32;42c`, listing soft fonts, but the panel drew the plain ASCII codes.
+- **Cause:** on Windows, terminals other than a classic console window host programs through ConPTY. conhost sits in between and answers DA1 with its own attributes, not the hosting terminal's.
+- **Decision:** trust DA1 only when `WT_SESSION` is set or the console window is visible (a classic conhost window, which draws soft fonts itself). Under ConPTY the console window is a hidden pseudo window, so any other host gets a warning that support cannot be checked.
 
 ### Density and stutter
 

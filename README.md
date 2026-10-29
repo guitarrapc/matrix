@@ -36,7 +36,7 @@ matrix 0
 matrix --duration 0
 
 # Use ASCII glyphs, full-width movie-style glyphs, or film glyphs drawn with a terminal soft font. Default is ascii.
-# real needs soft font (DECDLD) support, such as Windows Terminal; other terminals show plain ASCII.
+# real needs soft font (DECDLD) support, such as Windows Terminal; other terminals show plain ASCII with a warning.
 matrix --mode <ascii|movie|real>
 
 # Pick a built-in color pattern.
