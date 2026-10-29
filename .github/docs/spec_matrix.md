@@ -293,5 +293,6 @@ These are behavioral constraints, easy to get wrong in a top-origin terminal:
 - File-based `#:` project + top-level statements: avoid file-scoped `const` and extra `Program` types, use a static help class and `Assembly.GetExecutingAssembly()` for `--version`.
 - Unix raw input: Linux and macOS need separate `termios` layouts and separate flag values: `ICANON` is 0x2 on Linux but 0x100 on macOS, and `VMIN`/`VTIME` sit at different `c_cc` indexes. Using the Linux bit on macOS leaves canonical mode on, so keys and DA1 replies only arrive after Enter or EOF.
 - Unix input readiness uses `poll`, never `ioctl(FIONREAD)`: `ioctl` is variadic, and Apple's arm64 ABI passes variadic arguments on the stack, so a plain P/Invoke corrupts memory (`AccessViolationException` on Apple Silicon). Do not P/Invoke any variadic libc function.
+- Native calls use `[LibraryImport]`, not `[DllImport]`: the source generator emits the marshalling code at compile time, so NativeAOT needs no runtime stubs. `bool` has no default native form there, so every `bool` return and parameter states `[MarshalAs(UnmanagedType.Bool)]` (Win32 `BOOL`, 4 bytes).
 - True Color gate stays conservative: 256-color `TERM` is not enough.
 - Hot path: pre-built ANSI prefixes, pooled grid/buffers, one `Stream.Write` + `Flush` per frame, and glyph/color pools built once at startup.

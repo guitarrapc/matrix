@@ -771,7 +771,7 @@ internal static class ColorParser
     }
 }
 
-internal static class TerminalCapabilities
+internal static partial class TerminalCapabilities
 {
     internal static TerminalColorMode ResolveColorMode()
     {
@@ -997,20 +997,23 @@ internal static class TerminalCapabilities
                colorTerm.Equals("24bit", StringComparison.OrdinalIgnoreCase);
     }
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr GetStdHandle(int nStdHandle);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial IntPtr GetStdHandle(int nStdHandle);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
 
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr GetConsoleWindow();
+    [LibraryImport("kernel32.dll")]
+    private static partial IntPtr GetConsoleWindow();
 
-    [DllImport("user32.dll")]
-    private static extern bool IsWindowVisible(IntPtr hWnd);
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool IsWindowVisible(IntPtr hWnd);
 }
 
 /// <summary>
@@ -1018,7 +1021,7 @@ internal static class TerminalCapabilities
 /// On Windows, Thread.Sleep rounds up to the 15.6 ms system tick (30 FPS became about 21 FPS),
 /// so waits use a high-resolution waitable timer. Other platforms already sleep precisely.
 /// </summary>
-internal sealed class FramePacer : IDisposable
+internal sealed partial class FramePacer : IDisposable
 {
     private const uint CreateWaitableTimerHighResolution = 0x00000002;
     private const uint TimerAllAccess = 0x001F0003;
@@ -1073,17 +1076,19 @@ internal sealed class FramePacer : IDisposable
             CloseHandle(_timer);
     }
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr CreateWaitableTimerExW(IntPtr lpTimerAttributes, IntPtr lpTimerName, uint dwFlags, uint dwDesiredAccess);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial IntPtr CreateWaitableTimerExW(IntPtr lpTimerAttributes, IntPtr lpTimerName, uint dwFlags, uint dwDesiredAccess);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetWaitableTimer(IntPtr hTimer, ref long lpDueTime, int lPeriod, IntPtr pfnCompletionRoutine, IntPtr lpArgToCompletionRoutine, bool fResume);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetWaitableTimer(IntPtr hTimer, ref long lpDueTime, int lPeriod, IntPtr pfnCompletionRoutine, IntPtr lpArgToCompletionRoutine, [MarshalAs(UnmanagedType.Bool)] bool fResume);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    private static partial uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr hObject);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool CloseHandle(IntPtr hObject);
 }
 
 internal static class RainBrightness
@@ -2295,7 +2300,7 @@ internal static class TerminalInput
     }
 }
 
-internal static unsafe class NativeTermios
+internal static unsafe partial class NativeTermios
 {
     private const int StdinFileno = 0;
 
@@ -2405,28 +2410,28 @@ internal static unsafe class NativeTermios
         internal ulong c_ospeed;
     }
 
-    [DllImport("libc", SetLastError = true)]
-    private static extern int tcgetattr(int fd, out TermiosLinux termios);
+    [LibraryImport("libc", SetLastError = true)]
+    private static partial int tcgetattr(int fd, out TermiosLinux termios);
 
-    [DllImport("libc", SetLastError = true, EntryPoint = "tcgetattr")]
-    private static extern int tcgetattrMac(int fd, out TermiosMac termios);
+    [LibraryImport("libc", SetLastError = true, EntryPoint = "tcgetattr")]
+    private static partial int tcgetattrMac(int fd, out TermiosMac termios);
 
-    [DllImport("libc", SetLastError = true)]
-    private static extern int tcsetattr(int fd, int optionalActions, ref TermiosLinux termios);
+    [LibraryImport("libc", SetLastError = true)]
+    private static partial int tcsetattr(int fd, int optionalActions, ref TermiosLinux termios);
 
-    [DllImport("libc", SetLastError = true, EntryPoint = "tcsetattr")]
-    private static extern int tcsetattrMac(int fd, int optionalActions, ref TermiosMac termios);
+    [LibraryImport("libc", SetLastError = true, EntryPoint = "tcsetattr")]
+    private static partial int tcsetattrMac(int fd, int optionalActions, ref TermiosMac termios);
 
     private static int tcgetattrLinux(int fd, out TermiosLinux termios) => tcgetattr(fd, out termios);
 
     private static int tcsetattrLinux(int fd, int optionalActions, ref TermiosLinux termios) =>
         tcsetattr(fd, optionalActions, ref termios);
 
-    [DllImport("libc", SetLastError = true)]
-    private static extern int poll(ref PollFd fds, nuint nfds, int timeout);
+    [LibraryImport("libc", SetLastError = true)]
+    private static partial int poll(ref PollFd fds, nuint nfds, int timeout);
 
-    [DllImport("libc", SetLastError = true)]
-    private static extern int read(int fd, ref byte buffer, int count);
+    [LibraryImport("libc", SetLastError = true)]
+    private static partial int read(int fd, ref byte buffer, int count);
 }
 
 internal static class AppText
