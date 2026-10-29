@@ -85,6 +85,8 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 
 `--char` together with `--mode movie` or `--mode kana` is a fatal error. `--char` selects single-character mode.
 
+`--char` takes only a character that draws as one glyph of its own. Controls (tab, newline), format characters (zero-width space, joiners, soft hyphen), combining marks, line and paragraph separators, and lone surrogates are fatal errors: they move the cursor, draw nothing, or draw on the previous cell, so the grid would shift.
+
 A non-ASCII `--char` needs UTF-8 output (see Windows console code page), and it is a fatal error when the terminal cannot provide it. A full-width character (East Asian Wide or Fullwidth, such as `ア` or `漢`) takes two display cells, so it uses the katakana layout: even anchor columns and a Continuation cell. Ambiguous-width characters such as `λ` count as 1 cell, as most terminals draw them.
 
 ### movie mode

@@ -357,6 +357,8 @@ internal sealed class CliOptions
                         return Error("missing value for --char");
                     if (args[i].Length != 1)
                         return Error("--char requires exactly one character");
+                    if (!IsDrawableChar(args[i][0]))
+                        return Error("--char requires a visible character, not a control, format, or combining character");
                     hasChar = true;
                     singleChar = args[i][0];
                     break;
@@ -461,6 +463,25 @@ internal sealed class CliOptions
     }
 
     private static CliOptions Error(string message) => new() { ErrorMessage = message };
+
+    /// <summary>
+    /// False for characters that do not draw as one glyph of their own: controls move the cursor (tab, newline),
+    /// format characters are invisible (zero-width space, joiners), combining marks draw on the previous cell,
+    /// line and paragraph separators break the row, and a lone surrogate is not a character at all.
+    /// Any of them would shift or break the grid.
+    /// </summary>
+    internal static bool IsDrawableChar(char c) => System.Globalization.CharUnicodeInfo.GetUnicodeCategory(c) switch
+    {
+        System.Globalization.UnicodeCategory.Control => false,
+        System.Globalization.UnicodeCategory.Format => false,
+        System.Globalization.UnicodeCategory.Surrogate => false,
+        System.Globalization.UnicodeCategory.NonSpacingMark => false,
+        System.Globalization.UnicodeCategory.SpacingCombiningMark => false,
+        System.Globalization.UnicodeCategory.EnclosingMark => false,
+        System.Globalization.UnicodeCategory.LineSeparator => false,
+        System.Globalization.UnicodeCategory.ParagraphSeparator => false,
+        _ => true,
+    };
 
     private static bool TryParseDuration(ReadOnlySpan<char> text, out double seconds)
     {
