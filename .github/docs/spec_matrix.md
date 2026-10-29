@@ -135,7 +135,7 @@ matrix --char <character>
 matrix --mode <ascii|movie|kana>
 matrix --density <0.0-1.0>
 matrix --fps <1-60>
-matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
+matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow|fire>
 matrix --bg <color> --head <color> --bright <color> --dim <color>
 matrix --cursor-intensity <0.5-5.0>
 matrix --help
@@ -176,8 +176,11 @@ Color patterns:
 | `twilight` | Deep-blue background, violet/pink/magenta rain, yellow heads. |
 | `rain` | Blue-cyan rain on a dark rainy-night background. |
 | `rainbow` | Seven vertical color bands: red, orange, yellow, green, blue, indigo, violet. |
+| `fire` | Horizontal color bands from deep red at the top through orange to yellow at the bottom, on a dark ember background. |
 
-For non-rainbow patterns, `--bg`, `--head`, `--bright`, and `--dim` override preset colors. For `rainbow`, only `--bg` overrides the preset, rain colors come from the band palette.
+`fire` changes color by row, not by column. A stream's color then shifts as it falls, so the head heats up toward the bottom and its trail stays cooler above it. Hot at the bottom also matches a real flame: bright core at the base, red tips above. The gradient uses many thin bands so no band edge shows, and band height follows the terminal height.
+
+For `rainbow` and `fire`, only `--bg` overrides the preset, rain colors come from the band palette. For other patterns, `--bg`, `--head`, `--bright`, and `--dim` override preset colors.
 
 Terminal pixel shaders are configured outside the CLI. `matrix` does not detect shader state or change its software head bloom for shaders, bloom strength belongs in the shader file.
 
