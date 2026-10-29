@@ -49,22 +49,31 @@ if (Console.IsOutputRedirected)
 var colorMode = TerminalCapabilities.ResolveColorMode();
 if (colorMode == TerminalColorMode.Ansi16)
 {
-    Console.Error.WriteLine("warning: true color not supported; falling back to 16-color palette");
+    Console.Error.WriteLine("warning: true color not supported. falling back to 16-color palette");
 }
 else if (colorMode == TerminalColorMode.None)
 {
-    Console.Error.WriteLine("warning: ANSI color not supported; falling back to colorless ASCII output");
+    Console.Error.WriteLine("warning: ANSI color not supported. falling back to colorless ASCII output");
 }
 
 // Movie mode draws the film glyphs with a soft font when the terminal confirms support,
-// and otherwise falls back to full-width katakana without a warning.
+// and otherwise falls back to full-width katakana with a warning. --mode kana skips the check.
 var glyphMode = options.Mode;
 var density = options.Density;
-if (glyphMode == GlyphMode.Movie && TerminalCapabilities.CanUseSoftFont(colorMode))
+if (glyphMode == GlyphMode.Movie && options.ProbeSoftFont)
 {
-    glyphMode = GlyphMode.MovieSoftFont;
-    if (!options.DensityExplicit)
-        density = EngineConstants.DefaultDensity;
+    if (TerminalCapabilities.CanUseSoftFont(colorMode, out var fallbackReason))
+    {
+        glyphMode = GlyphMode.MovieSoftFont;
+        if (!options.DensityExplicit)
+            density = EngineConstants.DefaultDensity;
+    }
+    else
+    {
+        Console.Error.Write("warning: ");
+        Console.Error.Write(fallbackReason);
+        Console.Error.WriteLine(". falling back to katakana glyphs (use --mode kana to skip this check)");
+    }
 }
 
 var cursorIntensity = options.CursorIntensity;
@@ -72,7 +81,7 @@ var cursorIntensity = options.CursorIntensity;
 var keyExitEnabled = !Console.IsInputRedirected;
 if (!keyExitEnabled)
 {
-    Console.Error.WriteLine("warning: stdin is not a tty; key exit disabled, using duration only");
+    Console.Error.WriteLine("warning: stdin is not a tty. key exit disabled, using duration only");
 }
 
 GlyphPool pool;
@@ -156,7 +165,7 @@ internal enum GlyphMode : byte
     AsciiMatrix = 0,
     Single = 1,
     Movie = 2,
-    /// <summary>Movie mode drawn with the soft font; chosen at startup, not a CLI value.</summary>
+    /// <summary>Movie mode drawn with the soft font, chosen at startup, not a CLI value.</summary>
     MovieSoftFont = 3,
 }
 
@@ -199,7 +208,7 @@ internal static class EngineConstants
     internal const int LutDimIndex = 64;
     internal const int LutBrightIndex = 191;
     internal const double LutBrightScale = 1.18;
-    /// <summary>&lt; 1 lifts mid-trail vs tip; tip still reaches 0.</summary>
+    /// <summary>&lt; 1 lifts mid-trail vs tip, tip still reaches 0.</summary>
     internal const double TrailEnvelopeGamma = 0.58;
     /// <summary>Protect the first trail cells from the rain wave starting at a dark phase.</summary>
     internal const int NearHeadBrightnessFloorCells = 5;
@@ -289,6 +298,8 @@ internal enum ColorPattern
 internal sealed class CliOptions
 {
     internal GlyphMode Mode { get; private init; } = GlyphMode.AsciiMatrix;
+    /// <summary>True for --mode movie (try the soft font); false for --mode kana (katakana only).</summary>
+    internal bool ProbeSoftFont { get; private init; }
     internal char SingleChar { get; private init; } = '0';
     internal double DurationSeconds { get; private init; } = 5;
     internal bool ShowHelp { get; private init; }
@@ -305,6 +316,8 @@ internal sealed class CliOptions
     {
         var mode = GlyphMode.AsciiMatrix;
         var poolMode = GlyphMode.AsciiMatrix;
+        var probeSoftFont = false;
+        var modeName = "ascii";
         var hasChar = false;
         var singleChar = '0';
         var duration = 5.0;
@@ -329,12 +342,26 @@ internal sealed class CliOptions
                 case "--mode":
                     if (++i >= args.Length)
                         return Error("missing value for --mode");
+                    modeName = args[i];
                     if (args[i] == "movie")
+                    {
                         poolMode = GlyphMode.Movie;
+                        probeSoftFont = true;
+                    }
+                    else if (args[i] == "kana")
+                    {
+                        poolMode = GlyphMode.Movie;
+                        probeSoftFont = false;
+                    }
                     else if (args[i] == "ascii")
+                    {
                         poolMode = GlyphMode.AsciiMatrix;
+                        probeSoftFont = false;
+                    }
                     else
-                        return Error("unknown --mode value (expected 'ascii' or 'movie')");
+                    {
+                        return Error("unknown --mode value (expected 'ascii', 'movie', or 'kana')");
+                    }
                     break;
                 case "--char":
                     if (++i >= args.Length)
@@ -415,7 +442,7 @@ internal sealed class CliOptions
         }
 
         if (hasChar && poolMode == GlyphMode.Movie)
-            return Error("--char and --mode movie cannot be used together");
+            return Error($"--char and --mode {modeName} cannot be used together");
 
         if (hasDurationFlag && hasPositionalDuration)
             return Error("specify duration either as a positional argument or via --duration, not both");
@@ -437,6 +464,7 @@ internal sealed class CliOptions
             DurationSeconds = duration,
             Density = density,
             DensityExplicit = hasDensityFlag,
+            ProbeSoftFont = mode == GlyphMode.Movie && probeSoftFont,
             CursorIntensity = cursorIntensity,
             Fps = fps,
             Colors = colors,
@@ -798,16 +826,41 @@ internal static class TerminalCapabilities
     }
 
     /// <summary>
-    /// True only when the terminal confirms soft font (DECDLD) support. Unconfirmed cases return false:
-    /// no VT output, stdin not a tty, a ConPTY host other than Windows Terminal, or no DA1 reply.
+    /// True only when the terminal confirms soft font (DECDLD) support. Otherwise returns false with
+    /// the reason: no VT output, stdin not a tty, a ConPTY host other than Windows Terminal, or no DA1 reply.
     /// </summary>
-    internal static bool CanUseSoftFont(TerminalColorMode colorMode)
+    internal static bool CanUseSoftFont(TerminalColorMode colorMode, out string reason)
     {
-        if (colorMode == TerminalColorMode.None || Console.IsInputRedirected)
+        reason = string.Empty;
+        if (colorMode == TerminalColorMode.None)
+        {
+            reason = "VT output is not available";
             return false;
+        }
+
+        if (Console.IsInputRedirected)
+        {
+            reason = "stdin is not a tty, so soft font (DECDLD) support cannot be checked";
+            return false;
+        }
+
         if (IsBehindOtherPseudoConsoleHost())
+        {
+            reason = "the Windows console host answers terminal queries for this terminal, so soft font (DECDLD) support cannot be checked";
             return false;
-        return QuerySoftFontSupport() == true;
+        }
+
+        switch (QuerySoftFontSupport())
+        {
+            case true:
+                return true;
+            case false:
+                reason = "terminal does not report soft font (DECDLD) support";
+                return false;
+            default:
+                reason = "terminal did not answer the device attributes query";
+                return false;
+        }
     }
 
     /// <summary>
@@ -1534,7 +1587,7 @@ internal sealed class GlyphPool
                 EnsureUtf8();
                 return new GlyphPool(MovieKatakanaChars, '\0', false, GlyphMode.Movie, requiresWideColumns: true);
             case GlyphMode.MovieSoftFont:
-                // Plain ASCII codes; the terminal draws them with the soft font loaded by MatrixSoftFont.
+                // Plain ASCII codes, the terminal draws them with the soft font loaded by MatrixSoftFont.
                 return new GlyphPool(MatrixSoftFont.Codes, '\0', false, GlyphMode.MovieSoftFont, requiresWideColumns: false);
             default:
                 return new GlyphPool(AsciiMatrixChars, '\0', false, GlyphMode.AsciiMatrix, requiresWideColumns: false);
@@ -2378,6 +2431,7 @@ Usage:
   matrix --char <character>
   matrix --mode ascii
   matrix --mode movie
+  matrix --mode kana
   matrix --density <0.0-1.0>
   matrix --fps <1-60>
   matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
@@ -2396,13 +2450,14 @@ Modes:
   --char X    single-character mode
   --mode movie  film glyphs (mirrored katakana, digits, symbols) drawn with a terminal
                 soft font (DECDLD) when the terminal reports support, such as Windows
-                Terminal. Otherwise full-width katakana with Japanese marks and symbols
-                (UTF-8 required).
+                Terminal. Otherwise warns and falls back to the kana pool.
+  --mode kana   full-width katakana with Japanese marks and symbols, without the soft
+                font check (UTF-8 required)
 
 Density:
   --density     Rain density from 0.0 (sparse) to 1.0 (dense).
                 Default 0.55 (ascii-matrix / single / movie with soft font).
-                Default 0.7 (movie with katakana), with a 1.5x effective boost (capped at 1.0).
+                Default 0.7 (movie with katakana, kana), with a 1.5x effective boost (capped at 1.0).
 
 Timing:
   --fps         Frames per second (1-60). Default 14.
@@ -2432,6 +2487,7 @@ Examples:
   matrix --mode movie --density 0.8
   matrix --fps 24
   matrix --mode movie --fps 7
+  matrix --mode kana
   matrix --pattern resurrections
   matrix --pattern rain
   matrix --pattern rainbow --bg #050505

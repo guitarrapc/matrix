@@ -35,10 +35,10 @@ matrix
 matrix 0
 matrix --duration 0
 
-# ASCII グリフ、または映画のグリフを使います。デフォルトは ascii です。
-# movie はソフトフォント (DECDLD) 対応の端末 (Windows Terminal など) では映画のグリフを、
-# それ以外の端末では全角カタカナを表示します。
-matrix --mode <ascii|movie>
+# ASCII グリフ、映画のグリフ、または全角カタカナを使います。デフォルトは ascii です。
+# movie はソフトフォント (DECDLD) 対応の端末 (Windows Terminal など) では映画のグリフを表示します。
+# それ以外の端末では警告を出し、kana と同じ全角カタカナで表示します。
+matrix --mode <ascii|movie|kana>
 
 # 組み込みのカラーパターンを選びます。
 matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
@@ -58,7 +58,7 @@ matrix --char "λ"
 
 ```bash
 matrix [duration]
-matrix [--duration <seconds>] [--mode <ascii|movie>] [--char <character>]
+matrix [--duration <seconds>] [--mode <ascii|movie|kana>] [--char <character>]
        [--density <0.0-1.0>] [--fps <1-60>]
        [--pattern <classic|resurrections|operator|twilight|rain|rainbow>]
        [--bg <color>] [--head <color>] [--bright <color>] [--dim <color>]

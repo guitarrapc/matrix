@@ -35,10 +35,10 @@ matrix
 matrix 0
 matrix --duration 0
 
-# Use ASCII glyphs or movie glyphs. Default is ascii.
+# Use ASCII glyphs, movie glyphs, or full-width katakana. Default is ascii.
 # movie draws the film glyphs with a terminal soft font (DECDLD) when the terminal supports it,
-# such as Windows Terminal, and full-width katakana otherwise.
-matrix --mode <ascii|movie>
+# such as Windows Terminal. Otherwise it warns and falls back to the same katakana as kana.
+matrix --mode <ascii|movie|kana>
 
 # Pick a built-in color pattern.
 matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
@@ -58,7 +58,7 @@ matrix --char "λ"
 
 ```bash
 matrix [duration]
-matrix [--duration <seconds>] [--mode <ascii|movie>] [--char <character>]
+matrix [--duration <seconds>] [--mode <ascii|movie|kana>] [--char <character>]
        [--density <0.0-1.0>] [--fps <1-60>]
        [--pattern <classic|resurrections|operator|twilight|rain|rainbow>]
        [--bg <color>] [--head <color>] [--bright <color>] [--dim <color>]
