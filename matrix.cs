@@ -1793,8 +1793,16 @@ internal sealed class MatrixEngine : IDisposable
         _spawnsThisFrame = 0;
         RefreshAdaptiveSpawnChance();
 
-        for (var x = 0; x < _width; x++)
+        // MaxSpawnsPerFrame is consumed in scan order, so a fixed left-to-right scan starves the right edge.
+        // Start each frame at a random column so every column gets the same chance at the spawn budget.
+        var start = _rng.Next(_width);
+        if (_wideColumns)
+            start &= ~1;
+        for (var i = 0; i < _width; i++)
         {
+            var x = start + i;
+            if (x >= _width)
+                x -= _width;
             if (_wideColumns && (x & 1) == 1)
                 continue;
             UpdateColumn(x);
