@@ -276,6 +276,7 @@ internal enum ColorPattern
     Fire,
     Cycle,
     Pulse,
+    Wave,
 }
 
 internal sealed class CliOptions
@@ -393,7 +394,7 @@ internal sealed class CliOptions
                     if (++i >= args.Length)
                         return Error("missing value for --pattern");
                     if (!TryParseColorPattern(args[i], out pattern))
-                        return Error("invalid --pattern value (expected classic, resurrections, operator, twilight, rain, rainbow, fire, cycle, or pulse)");
+                        return Error("invalid --pattern value (expected classic, resurrections, operator, twilight, rain, rainbow, fire, cycle, pulse, or wave)");
                     break;
                 case "--density":
                     if (++i >= args.Length)
@@ -542,6 +543,12 @@ internal sealed class CliOptions
             return true;
         }
 
+        if (text.Equals("wave", StringComparison.OrdinalIgnoreCase))
+        {
+            pattern = ColorPattern.Wave;
+            return true;
+        }
+
         pattern = default;
         return false;
     }
@@ -601,7 +608,7 @@ internal readonly struct ColorOptions(
     private static ColorOptions Preset(ColorPattern pattern) =>
         pattern switch
         {
-            ColorPattern.Classic or ColorPattern.Pulse => Default,
+            ColorPattern.Classic or ColorPattern.Pulse or ColorPattern.Wave => Default,
             ColorPattern.Resurrections => new ColorOptions(
                 pattern,
                 new ColorValue(new Rgb(1, 10, 2)),       // #010A02
@@ -1236,6 +1243,23 @@ internal sealed class AnsiPalette
     // Brightness between beats. Low enough that the beat reads clearly, high enough that rain stays visible.
     private const double PulseRest = 0.55;
 
+    // Whether a sine-shaped band of light sweeps across the rain (wave).
+    private readonly bool _wave;
+
+    // The crest moves one wavelength to the right every 42 frames, about 3 seconds at the default 14 fps.
+    private const int WaveFramesPerWavelength = 42;
+    // Two crests fit across the screen, but never shorter than this, so narrow terminals keep a gentle slope.
+    private const double WaveMinWavelength = 24;
+    // Crest height above or below the screen middle, as a fraction of screen height.
+    private const double WaveAmplitude = 0.25;
+    // Light band half-thickness as a fraction of screen height, at least WaveMinThickness rows.
+    private const double WaveThickness = 0.08;
+    private const double WaveMinThickness = 1.5;
+    // Off the crest the rain dims to WaveRest. On the crest it is pushed past normal brightness to WavePeak,
+    // so the faint trail cells the band passes through light up too.
+    private const double WaveRest = 0.5;
+    private const double WavePeak = 1.3;
+
     // A cycle band moves one column-band to the right every this many frames.
     // 48 bands x 2 frames is one full hue loop in about 7 seconds at the default 14 fps.
     private const int CycleBandCount = 48;
@@ -1258,6 +1282,7 @@ internal sealed class AnsiPalette
         BrightnessPalette[]? bandPalettes,
         BandLayout bandLayout,
         double[]? pulseCurve,
+        bool wave,
         TerminalColorMode colorMode,
         Rgb cursorAddend,
         Rgb[]? bandCursorAddends)
@@ -1268,6 +1293,7 @@ internal sealed class AnsiPalette
         _bandPalettes = bandPalettes;
         _bandLayout = bandLayout;
         _pulseCurve = pulseCurve;
+        _wave = wave;
         _colorMode = colorMode;
         _cursorAddend = cursorAddend;
         _bandCursorAddends = bandCursorAddends;
@@ -1320,7 +1346,24 @@ internal sealed class AnsiPalette
         };
         var pulseCurve = colors.Pattern == ColorPattern.Pulse ? CreatePulseCurve() : null;
         var cursorAddend = BrightnessPalette.ScaleRgb(palette.HeadColor, cursorIntensity);
-        return new AnsiPalette(bgPrefix, rowFgReset, palette, bandPalettes, bandLayout, pulseCurve, colorMode, cursorAddend, bandCursorAddends);
+        var wave = colors.Pattern == ColorPattern.Wave;
+        return new AnsiPalette(bgPrefix, rowFgReset, palette, bandPalettes, bandLayout, pulseCurve, wave, colorMode, cursorAddend, bandCursorAddends);
+    }
+
+    /// <summary>
+    /// Brightness multiplier at a cell for the wave pattern: high near a sine curve that travels right, low elsewhere.
+    /// Cheap enough per cell next to <see cref="Dither"/>, which already calls Math.Sin per cell.
+    /// </summary>
+    private static double WaveGain(int x, int y, int width, int height, ulong frameNumber)
+    {
+        var wavelength = Math.Max(WaveMinWavelength, width / 2.0);
+        var travel = (frameNumber % WaveFramesPerWavelength) / (double)WaveFramesPerWavelength;
+        // Subtracting travel moves the crest toward larger x as frames advance.
+        var phase = 2 * Math.PI * (x / wavelength - travel);
+        var crest = (height - 1) * 0.5 + height * WaveAmplitude * Math.Sin(phase);
+        var thickness = Math.Max(WaveMinThickness, height * WaveThickness);
+        var d = (y - crest) / thickness;
+        return WaveRest + (WavePeak - WaveRest) * Math.Exp(-d * d);
     }
 
     /// <summary>
@@ -1598,11 +1641,18 @@ internal sealed class AnsiPalette
 
                 var brightness = cell.Brightness / 255.0;
                 brightness -= Dither(x, y, frameNumber) * (EngineConstants.DitherMagnitude / 3.0);
-                brightness = Math.Clamp(brightness * pulse, 0, 1);
+                var gain = _wave ? pulse * WaveGain(x, y, width, height, frameNumber) : pulse;
+                brightness = Math.Clamp(brightness * gain, 0, 1);
                 var palette = SelectPalette(x, y, width, height, frameNumber, out var band);
                 var rgb = palette.Sample((byte)(brightness * 255));
                 if (cell.CursorBoost != 0)
-                    rgb = BrightnessPalette.AddClamped(rgb, SelectCursorAddend(band, frameCursorAddend));
+                {
+                    var cursorAddend = SelectCursorAddend(band, frameCursorAddend);
+                    // Heads off the crest dim with the rain. On the crest they keep their normal bloom.
+                    if (_wave)
+                        cursorAddend = BrightnessPalette.ScaleRgb(cursorAddend, Math.Min(1, gain));
+                    rgb = BrightnessPalette.AddClamped(rgb, cursorAddend);
+                }
 
                 if (_colorMode == TerminalColorMode.TrueColor)
                 {
@@ -2506,7 +2556,7 @@ Usage:
   matrix --mode kana
   matrix --density <0.0-1.0>
   matrix --fps <1-60>
-  matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow|fire|cycle|pulse>
+  matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow|fire|cycle|pulse|wave>
   matrix --bg <color> --head <color> --bright <color> --dim <color>
   matrix --cursor-intensity <0.5-5.0>
   matrix --help
@@ -2553,6 +2603,8 @@ Colors:
                         keeps flowing to the right. Only --bg overrides this pattern.
                  pulse: classic colors whose brightness beats like a slow heart.
                         All color options override this pattern, so any color can pulse.
+                 wave: classic colors with a sine-shaped band of light sweeping
+                       right through the rain. All color options override this pattern.
   Hex (#RGB or #RRGGBB) or 16-color names (black, green, darkgreen, ...).
   Defaults: --pattern classic --bg #000000 --head #FFFFFF --bright #30FF58 --dim #053D16
   --cursor-intensity  Head-cell bloom strength (additive --head). Default 2.5.
@@ -2573,6 +2625,7 @@ Examples:
   matrix --pattern fire
   matrix --pattern cycle 0
   matrix --pattern pulse --bright #FF3040 --dim #400008
+  matrix --pattern wave --density 0.8 0
   matrix --bright #0F0 --dim #080
 
 Press any key to exit early. Ctrl+C also exits cleanly.

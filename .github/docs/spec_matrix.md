@@ -135,7 +135,7 @@ matrix --char <character>
 matrix --mode <ascii|movie|kana>
 matrix --density <0.0-1.0>
 matrix --fps <1-60>
-matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow|fire|cycle|pulse>
+matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow|fire|cycle|pulse|wave>
 matrix --bg <color> --head <color> --bright <color> --dim <color>
 matrix --cursor-intensity <0.5-5.0>
 matrix --help
@@ -179,6 +179,7 @@ Color patterns:
 | `fire` | Horizontal color bands from deep red at the top through orange to yellow at the bottom, on a dark ember background. |
 | `cycle` | A full hue wheel spread across the screen width that keeps flowing to the right. |
 | `pulse` | Classic colors whose whole-screen brightness beats like a slow heart. |
+| `wave` | Classic colors with a sine-shaped band of light sweeping right through the rain. |
 
 `fire` changes color by row, not by column. A stream's color then shifts as it falls, so the head heats up toward the bottom and its trail stays cooler above it. Hot at the bottom also matches a real flame: bright core at the base, red tips above. The gradient uses many thin bands so no band edge shows, and band height follows the terminal height.
 
@@ -186,7 +187,9 @@ Color patterns:
 
 `pulse` is a brightness effect, not a color scheme. Each beat is a "lub-dub": a strong beat, a weaker one right after, then a long rest, which reads as a heartbeat rather than a plain fade in and out. Between beats the screen drops to a little over half brightness, enough to keep the rain readable. Dimming lowers each cell's brightness before its color is chosen, so short tails fade into the background at rest and grow back on each beat. Head bloom dims with it, otherwise heads would stay fully lit between beats. One beat lasts 20 frames, about 1.4 seconds at the default 14 fps, counted in frames like `cycle`.
 
-For `rainbow`, `fire`, and `cycle`, only `--bg` overrides the preset, rain colors come from the band palette. For other patterns, including `pulse`, `--bg`, `--head`, `--bright`, and `--dim` override preset colors.
+`wave` is `pulse` spread across space instead of time: brightness depends on how far a cell is from a sine curve that travels right. The rain itself is unchanged. The wave shows up where it crosses streams, like light sweeping through rain, so it reads best at the default density or higher and breaks up in columns with no stream. Changing the rain's spawn timing instead would draw a crisper shape, but it would cost the random rain and belongs to motion, not color. On the crest brightness goes past normal, so faint trail cells inside the band light up as well, not only heads. Two crests fit across the screen and the crest swings a quarter of the screen height above and below the middle, so the shape scales with the terminal. A minimum wavelength keeps the slope gentle on narrow terminals. One wavelength passes every 42 frames, about 3 seconds at the default 14 fps. This is a separate effect from the per-column rain wave described under Color and brightness, which runs for every pattern.
+
+For `rainbow`, `fire`, and `cycle`, only `--bg` overrides the preset, rain colors come from the band palette. For other patterns, including `pulse` and `wave`, `--bg`, `--head`, `--bright`, and `--dim` override preset colors.
 
 Terminal pixel shaders are configured outside the CLI. `matrix` does not detect shader state or change its software head bloom for shaders, bloom strength belongs in the shader file.
 
