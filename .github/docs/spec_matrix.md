@@ -67,8 +67,7 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 | Trail length | height x **0.30** ... **0.90** per stream, min **10** cells |
 | Fall speed | 1-2 cells/frame per stream |
 | Glyph mutation | ~35% per frame per visible stream cell |
-| Katakana density (movie fallback, kana) | effective density x **1.5** (cap 1.0), because only even columns hold glyphs |
-| Initial active columns | effective density x **90%** at start / resize |
+| Active columns | density x **90%** of the columns that can hold a stream (even columns only for katakana), at start / resize and as the adaptive spawn target |
 | Spawn | Adaptive baseline with headroom, raised when active columns fall below target |
 | New stream trail length | Adaptive up to **+35%** when active columns are below target |
 | Stream births | Capped at **4** per frame to reduce synchronized stream deaths |
@@ -260,6 +259,7 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 
 - Fixed per-frame spawn could not maintain density across variable stream lifetimes.
 - Adaptive spawn and trail-length boost maintain target coverage, but overly synchronized births produce cohorts that die together.
+- **Removed:** a 1.5x density multiplier for katakana. It was added to offset even-column spacing, but the active-column target is already a fraction of the columns that can hold a stream, so the spacing was counted twice. Katakana reached the 90% cap from `--density` 0.67, so 0.67-1.0 all looked the same and the 0.7 default was already the densest setting. Now the same `--density` gives the same active fraction in every mode.
 - VS Code integrated terminal showed periodic global lag when frame size spiked. The durable constraints are: stagger initial heads, cap births per frame, allow sparse same-column recycling, deduplicate SGR, use row positioning plus clear-to-EOL, wrap frames in synchronized output, and wait until each frame's scheduled time.
 
 ### Frame pacing

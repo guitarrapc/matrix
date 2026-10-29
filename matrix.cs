@@ -187,7 +187,6 @@ internal static class EngineConstants
     internal const double DefaultDensity = 0.55;
     internal const double DefaultMovieDensity = 0.7;
     internal const int DensityActiveBasePercent = 90;
-    internal const double MovieDensityBoost = 1.5;
     /// <summary>Average cells a stream travels before deactivating ≈ factor × height (see spawn equilibrium).</summary>
     internal const double StreamLifetimeHeightFactor = 1.15;
     internal const double AvgFallSpeedCells = (MinSpeed + MaxSpeed) / 2.0;
@@ -1673,11 +1672,8 @@ internal sealed class MatrixEngine : IDisposable
         _targetFps = targetFps;
         _wideColumns = pool.RequiresWideColumns;
 
-        var effectiveDensity = Math.Clamp(density, 0, 1);
-        if (_wideColumns)
-            effectiveDensity = Math.Min(1.0, effectiveDensity * EngineConstants.MovieDensityBoost);
-
-        _effectiveDensity = effectiveDensity;
+        // Density is a fraction of the columns that can hold a stream, so wide (katakana) glyphs need no extra scaling.
+        _effectiveDensity = Math.Clamp(density, 0, 1);
         Resize();
     }
 
@@ -2457,8 +2453,7 @@ Modes:
 Density:
   --density     Rain density from 0.0 (sparse) to 1.0 (dense). Default 0.55.
                 Katakana glyphs (--mode kana, or --mode movie when it falls
-                back) fill only every other column, so their density is
-                multiplied by 1.5 (capped at 1.0) and the default is 0.7.
+                back) default to 0.7.
 
 Timing:
   --fps         Frames per second (1-60). Default 14.
