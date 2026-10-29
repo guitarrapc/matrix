@@ -33,7 +33,7 @@ The grid matches **terminal display cells** (width x height), not Unicode code u
 | Mode | Anchor columns | Glyph width |
 |---|---|---|
 | ascii-matrix / single / movie (soft font) | Any | 1 cell |
-| movie (katakana) / kana | Even columns only (`0`, `2`, `4`, ...) | 2 cells (full-width) |
+| movie (katakana) / kana / single with a full-width character | Even columns only (`0`, `2`, `4`, ...) | 2 cells (full-width) |
 
 Wide glyphs use an **anchor** cell plus a **Continuation** cell to the right. Continuation cells emit **nothing** during render, not even a space.
 
@@ -85,6 +85,8 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 
 `--char` together with `--mode movie` or `--mode kana` is a fatal error. `--char` selects single-character mode.
 
+A non-ASCII `--char` needs UTF-8 output (see Windows console code page), and it is a fatal error when the terminal cannot provide it. A full-width character (East Asian Wide or Fullwidth, such as `ア` or `漢`) takes two display cells, so it uses the katakana layout: even anchor columns and a Continuation cell. Ambiguous-width characters such as `λ` count as 1 cell, as most terminals draw them.
+
 ### movie mode
 
 **movie** aims at the glyphs seen in the films, which Unicode cannot express (many are mirrored katakana and digits), **without installing or shipping a font**. At startup it picks one of two renderings:
@@ -112,7 +114,7 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 
 **Katakana rendering** (movie fallback and `--mode kana`)
 
-Requires UTF-8 output. The program attempts to set console input/output to UTF-8 and fails if the terminal cannot support it. Streams use **full-width glyphs on even columns only**, half-width characters are excluded because mixed display widths break vertical alignment.
+Requires UTF-8 output, and fails when the terminal cannot provide it (see Windows console code page). Streams use **full-width glyphs on even columns only**, half-width characters are excluded because mixed display widths break vertical alignment.
 
 Glyph mix (weighted random):
 
@@ -316,6 +318,8 @@ These are behavioral constraints, easy to get wrong in a top-origin terminal:
 - Unix input readiness uses `poll`, never `ioctl(FIONREAD)`: `ioctl` is variadic, and Apple's arm64 ABI passes variadic arguments on the stack, so a plain P/Invoke corrupts memory (`AccessViolationException` on Apple Silicon). Do not P/Invoke any variadic libc function.
 - Native calls use `[LibraryImport]`, not `[DllImport]`: the source generator emits the marshalling code at compile time, so NativeAOT needs no runtime stubs. `bool` has no default native form there, so every `bool` return and parameter states `[MarshalAs(UnmanagedType.Bool)]` (Win32 `BOOL`, 4 bytes).
 - True Color gate stays conservative: 256-color `TERM` is not enough.
+- Windows console code page: frames are UTF-8 bytes, but a Windows console reads output in its code page, which defaults to the OEM code page (932 on Japanese Windows, 437 on US English). There `λ` showed as `ﾎｻ`, two cells, and shifted every row. The console output code page is switched to UTF-8 for the run and put back on exit, last, after the terminal state. The code page belongs to the console, not the process: movie mode used to switch it without restoring, so the shell stayed on UTF-8 after exit. It is read and restored with `GetConsoleOutputCP`/`SetConsoleOutputCP`, not `Console.OutputEncoding`, which cannot always represent an OEM code page. The input code page is left alone, since keys are read through the Unicode console API. Only non-ASCII glyph modes (katakana, a non-ASCII `--char`) fail when the switch fails.
+- Testing the code page: under `dotnet run` the console already reads UTF-8 (the probe saw 65001 even after `chcp 932`), which hides the garbling. Test with the built binary started from a console on its default code page.
 - Hot path: pre-built ANSI prefixes, pooled grid/buffers, one `Stream.Write` + `Flush` per frame, and glyph/color pools built once at startup. Steady-state frames allocate nothing. Buffers are replaced only on resize, and pooled ones go back to the pool.
 - Per-cell math avoids `Math.Sin`: the rain wave takes one `SinCos` per stream and advances row by row by rotation, and dither uses an integer hash. With one contiguous grid clear per frame and direct digit writes for color sequences, frame time at 565 x 112 dropped by about 40% (about 1.2 ms to 0.7 ms). Apart from the dither noise pattern, these changes leave the rendered output as it was.
 - Per-cell output and trail math reuse precomputed work: blanks and color codes are written straight into the frame buffer (a one-byte span copy cost more than the write), true color sequences are pre-encoded per LUT entry (heads, which add the cursor bloom, still encode live), and the trail envelope comes from a table per trail length built on resize instead of a `MathF.Pow` per cell. Output bytes are unchanged, and frame time at 565 x 112 dropped from about 0.65 ms to 0.3 ms. The cost is memory: about 5 KB per palette (cycle has 48, about 260 KB), and envelope tables bounded by the tallest window seen.

@@ -84,13 +84,18 @@ if (!keyExitEnabled)
     Console.Error.WriteLine("warning: stdin is not a tty. key exit disabled, using duration only");
 }
 
+// Frames are written as UTF-8 bytes. On Windows the console reads them in its output code page (932, 437, ...
+// by default), so switch it to UTF-8 for the run. The original code page comes back with the rest of the terminal state.
+var utf8Output = ConsoleCodePage.TrySwitchToUtf8(out var restoreCodePage);
+
 GlyphPool pool;
 try
 {
-    pool = GlyphPool.Create(glyphMode, options.SingleChar);
+    pool = GlyphPool.Create(glyphMode, options.SingleChar, utf8Output);
 }
 catch (InvalidOperationException ex)
 {
+    restoreCodePage();
     Console.Error.Write("Error: ");
     Console.Error.WriteLine(ex.Message);
     Environment.Exit(1);
@@ -101,7 +106,7 @@ var palette = AnsiPalette.Create(options.Colors, colorMode, cursorIntensity);
 using var engine = new MatrixEngine(pool, palette, density, options.Fps);
 using var pacer = new FramePacer(options.Fps);
 
-var restore = TerminalSession.Enter(keyExitEnabled, softFont: glyphMode == GlyphMode.MovieSoftFont);
+var restore = TerminalSession.Enter(keyExitEnabled, softFont: glyphMode == GlyphMode.MovieSoftFont, restoreCodePage);
 var exitRequested = false;
 
 Console.CancelKeyPress += (_, e) =>
@@ -1955,14 +1960,19 @@ internal sealed class GlyphPool
         RequiresWideColumns = requiresWideColumns;
     }
 
-    internal static GlyphPool Create(GlyphMode mode, char singleChar)
+    /// <param name="utf8Output">Whether the terminal reads output as UTF-8, required for any non-ASCII glyph.</param>
+    internal static GlyphPool Create(GlyphMode mode, char singleChar, bool utf8Output)
     {
         switch (mode)
         {
             case GlyphMode.Single:
-                return new GlyphPool(string.Empty, singleChar, true, GlyphMode.Single, requiresWideColumns: false);
+                if (singleChar > 0x7F && !utf8Output)
+                    throw new InvalidOperationException("--char with a non-ASCII character requires a UTF-8 capable terminal");
+                // A full-width character takes two display cells, so it uses the katakana layout.
+                return new GlyphPool(string.Empty, singleChar, true, GlyphMode.Single, requiresWideColumns: IsWide(singleChar));
             case GlyphMode.Movie:
-                EnsureUtf8();
+                if (!utf8Output)
+                    throw new InvalidOperationException("movie mode requires a UTF-8 capable terminal");
                 return new GlyphPool(MovieKatakanaChars, '\0', false, GlyphMode.Movie, requiresWideColumns: true);
             case GlyphMode.MovieSoftFont:
                 // Plain ASCII codes, the terminal draws them with the soft font loaded by MatrixSoftFont.
@@ -1972,21 +1982,26 @@ internal sealed class GlyphPool
         }
     }
 
-    private static void EnsureUtf8()
+    /// <summary>
+    /// True for East Asian Wide and Fullwidth characters, which terminals draw two cells wide:
+    /// Hangul Jamo, CJK symbols and punctuation, kana, CJK ideographs, Yi, Hangul syllables, and fullwidth forms.
+    /// Ambiguous-width characters such as Greek letters count as narrow, as Windows Terminal and most terminals draw them.
+    /// </summary>
+    internal static bool IsWide(char c) => c switch
     {
-        try
-        {
-            Console.OutputEncoding = Encoding.UTF8;
-            Console.InputEncoding = Encoding.UTF8;
-        }
-        catch (Exception)
-        {
-            throw new InvalidOperationException("movie mode requires a UTF-8 capable terminal");
-        }
-
-        if (!Encoding.UTF8.Equals(Console.OutputEncoding))
-            throw new InvalidOperationException("movie mode requires a UTF-8 capable terminal");
-    }
+        >= 'ᄀ' and <= 'ᅟ' => true,
+        >= '⺀' and <= '〾' => true,
+        >= 'ぁ' and <= '㏿' => true,
+        >= '㐀' and <= '䶿' => true,
+        >= '一' and <= '鿿' => true,
+        >= 'ꀀ' and <= '꓏' => true,
+        >= '가' and <= '힣' => true,
+        >= '豈' and <= '﫿' => true,
+        >= '︰' and <= '﹏' => true,
+        >= '＀' and <= '｠' => true,
+        >= '￠' and <= '￦' => true,
+        _ => false,
+    };
 
     internal char Pick(Random rng)
     {
@@ -2397,7 +2412,7 @@ internal struct ColumnState
 
 internal static class TerminalSession
 {
-    internal static Action Enter(bool rawInput, bool softFont)
+    internal static Action Enter(bool rawInput, bool softFont, Action restoreCodePage)
     {
         Console.Out.Write("\u001b[?1049h\u001b[?25l");
         if (softFont)
@@ -2415,8 +2430,52 @@ internal static class TerminalSession
                 Console.Out.Write(MatrixSoftFont.UnloadSequence);
             Console.Out.Write("\u001b[?25h\u001b[?1049l");
             Console.Out.Flush();
+            // Last, so every byte above is still read as UTF-8.
+            restoreCodePage();
         };
     }
+}
+
+/// <summary>
+/// Frames are written as UTF-8 bytes, but a Windows console reads output in its code page, which defaults
+/// to the OEM code page (932 on Japanese Windows, 437 on US English). There a non-ASCII glyph such as λ shows
+/// as two garbage characters and shifts the row. The code page is set on the console, not the process,
+/// so it stays changed after exit unless it is put back.
+/// </summary>
+internal static partial class ConsoleCodePage
+{
+    private const uint Utf8 = 65001;
+
+    /// <summary>
+    /// Switches the console output code page to UTF-8. Returns false when output is not read as UTF-8.
+    /// <paramref name="restore"/> puts the original code page back. Other platforms read UTF-8 already.
+    /// </summary>
+    internal static bool TrySwitchToUtf8(out Action restore)
+    {
+        restore = static () => { };
+        if (!OperatingSystem.IsWindows())
+            return true;
+
+        // Read the code page from the console itself: Console.OutputEncoding cannot always represent
+        // an OEM code page, so restoring through it could leave the console on another one.
+        var original = GetConsoleOutputCP();
+        if (original == 0)
+            return false;
+        if (original == Utf8)
+            return true;
+        if (!SetConsoleOutputCP(Utf8))
+            return false;
+
+        restore = () => SetConsoleOutputCP(original);
+        return true;
+    }
+
+    [LibraryImport("kernel32.dll")]
+    private static partial uint GetConsoleOutputCP();
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetConsoleOutputCP(uint wCodePageID);
 }
 
 /// <summary>
