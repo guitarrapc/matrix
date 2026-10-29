@@ -1192,6 +1192,27 @@ internal sealed class BrightnessPalette
 
     internal ConsoleColor16 SampleNamed(byte brightnessIndex) => _namedLut![brightnessIndex];
 
+    // Room for the longest true color foreground sequence, "\e[38;2;255;255;255m" (19 bytes).
+    private const int FgSequenceStride = 20;
+    // Pre-encoded true color foreground sequence of each LUT entry, built only for true color output.
+    private byte[]? _fgSequences;
+    private byte[]? _fgSequenceLengths;
+
+    /// <summary>Encodes every LUT entry's foreground sequence once, so true color frames copy instead of formatting digits.</summary>
+    internal void BuildFgSequences()
+    {
+        _fgSequences = new byte[_lut.Length * FgSequenceStride];
+        _fgSequenceLengths = new byte[_lut.Length];
+        for (var i = 0; i < _lut.Length; i++)
+        {
+            AnsiPalette.WriteTrueColorSequence(_fgSequences.AsSpan(i * FgSequenceStride, FgSequenceStride), isBackground: false, _lut[i], out var length);
+            _fgSequenceLengths[i] = (byte)length;
+        }
+    }
+
+    internal ReadOnlySpan<byte> FgSequence(byte brightnessIndex) =>
+        _fgSequences.AsSpan(brightnessIndex * FgSequenceStride, _fgSequenceLengths![brightnessIndex]);
+
     private static void BuildLut(Span<Rgb> lut, Rgb bright, Rgb dim, Rgb bg, Rgb? hot)
     {
         var vividBright = ScaleRgb(bright, EngineConstants.LutBrightScale);
@@ -1267,7 +1288,6 @@ internal sealed class AnsiPalette
     private readonly byte[] _clearEol = "\u001b[K"u8.ToArray();
     private readonly byte[] _bgRowPrefix;
     private readonly byte[] _rowFgReset;
-    private readonly byte[] _space = " "u8.ToArray();
     private readonly BrightnessPalette _palette;
     private readonly BrightnessPalette[]? _bandPalettes;
     private readonly TerminalColorMode _colorMode;
@@ -1406,14 +1426,12 @@ internal sealed class AnsiPalette
                 bandCursorAddends[i] = BrightnessPalette.ScaleRgb(bandPalettes[i].HeadColor, cursorIntensity);
         }
 
-        if (colorMode == TerminalColorMode.Ansi16)
+        // Per-entry output tables for the color mode, so frames skip per-cell color encoding.
+        BuildOutputTables(palette, colorMode);
+        if (bandPalettes is not null)
         {
-            palette.BuildNamedLut();
-            if (bandPalettes is not null)
-            {
-                foreach (var bandPalette in bandPalettes)
-                    bandPalette.BuildNamedLut();
-            }
+            foreach (var bandPalette in bandPalettes)
+                BuildOutputTables(bandPalette, colorMode);
         }
 
         var bandLayout = colors.Pattern switch
@@ -1595,6 +1613,14 @@ internal sealed class AnsiPalette
         return palettes;
     }
 
+    private static void BuildOutputTables(BrightnessPalette palette, TerminalColorMode colorMode)
+    {
+        if (colorMode == TerminalColorMode.TrueColor)
+            palette.BuildFgSequences();
+        else if (colorMode == TerminalColorMode.Ansi16)
+            palette.BuildNamedLut();
+    }
+
     private static Rgb ResolveRgb(ColorValue color) => color.Rgb;
 
     private static ConsoleColor16 ResolveNamed(ColorValue color)
@@ -1621,7 +1647,7 @@ internal sealed class AnsiPalette
         return scratch[..length].ToArray();
     }
 
-    private static void WriteTrueColorSequence(Span<byte> scratch, bool isBackground, Rgb rgb, out int length)
+    internal static void WriteTrueColorSequence(Span<byte> scratch, bool isBackground, Rgb rgb, out int length)
     {
         scratch[0] = 0x1B;
         scratch[1] = (byte)'[';
@@ -1710,7 +1736,6 @@ internal sealed class AnsiPalette
         var pos = 0;
         AppendBytes(buffer, ref pos, _syncStart);
         AppendBytes(buffer, ref pos, _home);
-        Span<byte> fgScratch = stackalloc byte[32];
 
         // Pulse dims both the rain and the head bloom together, so heads do not stay lit between beats.
         var pulse = _pulseCurve is null ? 1.0 : _pulseCurve[(int)(frameNumber % (ulong)_pulseCurve.Length)];
@@ -1747,7 +1772,8 @@ internal sealed class AnsiPalette
                         continue;
                     }
 
-                    AppendBytes(buffer, ref pos, _space);
+                    // Written directly: a one-byte span copy costs more than the write itself.
+                    buffer[pos++] = (byte)' ';
                     continue;
                 }
 
@@ -1772,8 +1798,17 @@ internal sealed class AnsiPalette
                     var fg = (rgb.R << 16) | (rgb.G << 8) | rgb.B;
                     if (fg != lastFg)
                     {
-                        WriteTrueColorSequence(fgScratch, isBackground: false, rgb, out var fgLen);
-                        AppendBytes(buffer, ref pos, fgScratch[..fgLen]);
+                        // Other cells copy the LUT entry's pre-encoded sequence. Heads add the cursor bloom, so theirs is encoded here.
+                        if (cell.CursorBoost == 0)
+                        {
+                            AppendBytes(buffer, ref pos, palette.FgSequence(lutIndex));
+                        }
+                        else
+                        {
+                            WriteTrueColorSequence(buffer.AsSpan(pos), isBackground: false, rgb, out var fgLen);
+                            pos += fgLen;
+                        }
+
                         lastFg = fg;
                     }
                 }
@@ -1784,8 +1819,8 @@ internal sealed class AnsiPalette
                     var named = cell.CursorBoost != 0 ? ColorParser.NearestNamed(rgb) : palette.SampleNamed(lutIndex);
                     if ((int)named != lastFg)
                     {
-                        WriteAnsi16Sequence(fgScratch, Ansi16FgCode(named), out var fgLen);
-                        AppendBytes(buffer, ref pos, fgScratch[..fgLen]);
+                        WriteAnsi16Sequence(buffer.AsSpan(pos), Ansi16FgCode(named), out var fgLen);
+                        pos += fgLen;
                         lastFg = (int)named;
                     }
                 }
@@ -1998,6 +2033,8 @@ internal sealed class MatrixEngine : IDisposable
     private ColumnState[] _columns = [];
     /// <summary>Per column: frames until the next stream enters at the top.</summary>
     private int[] _nextSpawnFrames = [];
+    /// <summary>Trail envelope per trail length, indexed by distance from the Head. Filled on resize.</summary>
+    private float[]?[] _envelopes = [];
     private byte[] _renderBuffer = [];
     private int _width;
     private int _height;
@@ -2109,6 +2146,7 @@ internal sealed class MatrixEngine : IDisposable
         // Rain falls in from the top: each column's first stream enters within the first screen height of frames.
         // A column starts in a gap with probability (1 - density), so the visible fraction is near the target from the start.
         var (minTrail, maxTrail) = TrailLengthRange();
+        EnsureEnvelopes(minTrail, maxTrail);
         var avgTrail = (minTrail + maxTrail) / 2;
         var typicalVisibleFrames = (StreamVisibleFrames(avgTrail, EngineConstants.MinSpeed) + StreamVisibleFrames(avgTrail, EngineConstants.MaxSpeed)) / 2;
         for (var x = 0; x < _width; x++)
@@ -2195,13 +2233,14 @@ internal sealed class MatrixEngine : IDisposable
         var updateStart = Math.Max(0, trailTop);
         var updateEnd = Math.Min(headY, _height - 1);
         var rain = new RainBrightness.Stepper(updateStart, _height, _simTime, column);
+        var envelopes = _envelopes[column.TrailLength]!;
         for (var y = updateStart; y <= updateEnd; y++)
         {
             var dist = headY - y;
             var glyph = NextGlyph(y * _width + x);
             var wave = rain.Next();
             wave = MathF.Max(wave, NearHeadWaveFloor(dist));
-            var envelope = TrailEnvelope(dist, column.TrailLength);
+            var envelope = envelopes[dist];
             wave = EngineConstants.RainWaveMinimum + wave * (1f - EngineConstants.RainWaveMinimum);
             var brightness = wave * envelope;
             var cursorBoost = (byte)(dist == 0 ? 1 : 0);
@@ -2226,6 +2265,28 @@ internal sealed class MatrixEngine : IDisposable
             return previous.Glyph;
 
         return _pool.Pick(_rng);
+    }
+
+    /// <summary>
+    /// Builds the envelope table of every trail length a stream can get at this height, so streams read
+    /// <see cref="TrailEnvelope"/> from a table instead of calling MathF.Pow per cell. A table depends only on its
+    /// length, so tables from earlier sizes are kept and reused.
+    /// </summary>
+    private void EnsureEnvelopes(int minTrail, int maxTrail)
+    {
+        if (_envelopes.Length <= maxTrail)
+            Array.Resize(ref _envelopes, maxTrail + 1);
+
+        for (var length = minTrail; length <= maxTrail; length++)
+        {
+            if (_envelopes[length] is not null)
+                continue;
+
+            var table = new float[length];
+            for (var distance = 0; distance < length; distance++)
+                table[distance] = TrailEnvelope(distance, length);
+            _envelopes[length] = table;
+        }
     }
 
     /// <summary>1 at Head, 0 at trail tip. Gamma &lt; 1 keeps mid-trail brighter while the tip still fades out.</summary>
