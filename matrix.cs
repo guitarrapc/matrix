@@ -181,7 +181,7 @@ internal static class EngineConstants
     internal const int DefaultTargetFps = 14;
     internal const int MinTargetFps = 1;
     internal const int MaxTargetFps = 60;
-    internal const int GlyphMutationChance = 35;
+    internal const int GlyphMutationChance = 10;
     internal const int MinSpeed = 1;
     internal const int MaxSpeed = 2;
     internal const double DefaultDensity = 0.55;

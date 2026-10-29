@@ -66,7 +66,7 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 | `--density` | 0.0-1.0, default **0.55** (ascii-matrix / single / movie with soft font), **0.7** (movie with katakana, kana) |
 | Trail length | height x **0.30** ... **0.90** per stream, min **10** cells |
 | Fall speed | 1-2 cells/frame per stream |
-| Glyph mutation | Head: a new glyph every frame. Trail: ~35% per frame per cell, otherwise the cell keeps its glyph |
+| Glyph mutation | Head: a new glyph every frame. Trail: ~10% per frame per cell, otherwise the cell keeps its glyph |
 | Density meaning | Fraction of the columns that can hold a stream (even columns only for katakana) that show rain at any moment. 1.0 keeps every column raining |
 | Spawn | Each column alternates stream and gap. Gaps are random, uniform in 0 ... 2 x the mean that gives the density. At 1.0 the next stream enters before the previous trail leaves |
 | Start / resize | Each column's first stream enters within the first screen height of frames, so rain falls in from the top |
@@ -236,7 +236,7 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 ### Glyph mutation
 
 - **Tried:** clear the grid every frame and redraw each stream, deciding mutation from the cleared cell.
-- **Result:** the clear also wiped the glyphs, so every lit cell picked a new glyph every frame (~98% changed, not ~35%). Trails read as noise instead of rain.
+- **Result:** the clear also wiped the glyphs, so every lit cell picked a new glyph every frame (~98% changed instead of the mutation chance). Trails read as noise instead of rain.
 - **Decision:** keep the last frame's grid. A cell lit in both frames keeps its glyph and changes with the mutation chance. A newly lit cell gets a fresh glyph, so the Head, which always enters a cell that was dark, changes every frame.
 
 ### movie mode layout
