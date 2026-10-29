@@ -24,7 +24,7 @@ Each column hosts one or more independent **streams**. A stream falls **straight
 | Downward motion | The segment shifts down each frame by 1-2 cells. |
 | Leading edge | The **Head** is at the bottom of the segment, older glyphs sit above. |
 | Glyph mutation | Characters may change while falling, positions stay aligned. |
-| Same-column recycling | A column may start a second stream before the prior stream fully exits when visible coverage is sparse enough. |
+| Same-column overlap | A column may start its next stream before the prior trail fully exits. At density 1.0 it always does, so the column never empties. |
 
 ### Display-cell grid
 
@@ -67,11 +67,10 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 | Trail length | height x **0.30** ... **0.90** per stream, min **10** cells |
 | Fall speed | 1-2 cells/frame per stream |
 | Glyph mutation | ~35% per frame per visible stream cell |
-| Active columns | density x **90%** of the columns that can hold a stream (even columns only for katakana), at start / resize and as the adaptive spawn target |
-| Spawn | Adaptive baseline with headroom, raised when active columns fall below target |
-| New stream trail length | Adaptive up to **+35%** when active columns are below target |
-| Stream births | Capped at **4** per frame to reduce synchronized stream deaths |
-| Streams per column | Up to **2** active streams |
+| Density meaning | Fraction of the columns that can hold a stream (even columns only for katakana) that show rain at any moment. 1.0 keeps every column raining |
+| Spawn | Each column alternates stream and gap. Gaps are random, uniform in 0 ... 2 x the mean that gives the density. At 1.0 the next stream enters before the previous trail leaves |
+| Start / resize | Each column's first stream enters within the first screen height of frames, so rain falls in from the top |
+| Streams per column | Up to **2** active streams, so the next stream can enter while the previous trail is still leaving |
 
 ---
 
@@ -260,7 +259,11 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 - Fixed per-frame spawn could not maintain density across variable stream lifetimes.
 - Adaptive spawn and trail-length boost maintain target coverage, but overly synchronized births produce cohorts that die together.
 - **Removed:** a 1.5x density multiplier for katakana. It was added to offset even-column spacing, but the active-column target is already a fraction of the columns that can hold a stream, so the spacing was counted twice. Katakana reached the 90% cap from `--density` 0.67, so 0.67-1.0 all looked the same and the 0.7 default was already the densest setting. Now the same `--density` gives the same active fraction in every mode.
-- VS Code integrated terminal showed periodic global lag when frame size spiked. The durable constraints are: stagger initial heads, cap births per frame, allow sparse same-column recycling, deduplicate SGR, use row positioning plus clear-to-EOL, wrap frames in synchronized output, and wait until each frame's scheduled time.
+- **Symptom:** `--density` 0.9 and 1.0 did not look like 90% and 100%, and in movie mode the right edge sometimes stayed empty for several seconds.
+- **Cause:** density targeted "active" columns at density x 90%. Active included streams still waiting above the screen, so at 1.0 only about 77% of columns showed rain and about 33% of cells were lit. Births were also capped at 4 per frame and handed out in a left-to-right scan. With many narrow columns the cap was hit most frames, so the left side took the births: in simulation the right fifth showed rain in 11% of frames against 75% on the left, and could stay fully empty for about 3 seconds.
+- **Decision:** density is now the fraction of columns showing rain, kept per column. Each column alternates stream and random gap, and the gap mean is set from the density, so no global controller, birth cap, or scan order is needed. In simulation the visible fraction matches the density (10 / 50 / 90 / 100% at 0.1 / 0.5 / 0.9 / 1.0) with no left-right bias. Random gaps keep births spread out, which replaces the birth cap as protection against cohorts.
+- **Trade-off:** density counts columns, not cells. Trails cover 30-90% of the height, so 1.0 lights about 40% of cells. The same default values now look denser than before (0.55 showed rain in about 40% of columns, now 55%).
+- VS Code integrated terminal showed periodic global lag when frame size spiked. The durable constraints are: stagger initial heads, spread births out (random per-column gaps), deduplicate SGR, use row positioning plus clear-to-EOL, wrap frames in synchronized output, and wait until each frame's scheduled time.
 
 ### Frame pacing
 
