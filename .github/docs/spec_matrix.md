@@ -66,7 +66,7 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 | `--density` | 0.0-1.0, default **0.55** (ascii-matrix / single / movie with soft font), **0.7** (movie with katakana, kana) |
 | Trail length | height x **0.30** ... **0.90** per stream, min **10** cells |
 | Fall speed | 1-2 cells/frame per stream |
-| Glyph mutation | ~35% per frame per visible stream cell |
+| Glyph mutation | Head: a new glyph every frame. Trail: ~35% per frame per cell, otherwise the cell keeps its glyph |
 | Density meaning | Fraction of the columns that can hold a stream (even columns only for katakana) that show rain at any moment. 1.0 keeps every column raining |
 | Spawn | Each column alternates stream and gap. Gaps are random, uniform in 0 ... 2 x the mean that gives the density. At 1.0 the next stream enters before the previous trail leaves |
 | Start / resize | Each column's first stream enters within the first screen height of frames, so rain falls in from the top |
@@ -233,6 +233,12 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 - **Result:** scattered flicker, not film-like rain.
 - **Decision:** shift each stream down as a unit, clear cells only when they leave the segment or the stream ends. Black belongs between columns, not inside trails.
 
+### Glyph mutation
+
+- **Tried:** clear the grid every frame and redraw each stream, deciding mutation from the cleared cell.
+- **Result:** the clear also wiped the glyphs, so every lit cell picked a new glyph every frame (~98% changed, not ~35%). Trails read as noise instead of rain.
+- **Decision:** keep the last frame's grid. A cell lit in both frames keeps its glyph and changes with the mutation chance. A newly lit cell gets a fresh glyph, so the Head, which always enters a cell that was dark, changes every frame.
+
 ### movie mode layout
 
 - **Tried:** mixed half-width and full-width glyphs in the same logical column.
@@ -311,4 +317,5 @@ These are behavioral constraints, easy to get wrong in a top-origin terminal:
 - Native calls use `[LibraryImport]`, not `[DllImport]`: the source generator emits the marshalling code at compile time, so NativeAOT needs no runtime stubs. `bool` has no default native form there, so every `bool` return and parameter states `[MarshalAs(UnmanagedType.Bool)]` (Win32 `BOOL`, 4 bytes).
 - True Color gate stays conservative: 256-color `TERM` is not enough.
 - Hot path: pre-built ANSI prefixes, pooled grid/buffers, one `Stream.Write` + `Flush` per frame, and glyph/color pools built once at startup. Steady-state frames allocate nothing. Only a resize rents new buffers, and the old ones go back to the pool.
+- Per-cell math avoids `Math.Sin`: the rain wave takes one `SinCos` per stream and advances row by row by rotation, and dither uses an integer hash. With one contiguous grid clear per frame and direct digit writes for color sequences, frame time at 565 x 112 dropped by about 40% (about 1.2 ms to 0.7 ms). Apart from the dither noise pattern, these changes leave the rendered output as it was.
 - Render buffer: sized to the most one frame can write (per cell, one foreground sequence and one glyph; per row, the cursor move, row colors, and clear to end of line). A fixed 72 bytes per cell rented 8 MB at 565 x 112 while frames peaked near 0.5 MB, the exact bound rents 2 MB. Any new per-cell or per-row sequence must raise the bound, or the frame write throws.

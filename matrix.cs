@@ -1112,14 +1112,43 @@ internal static class RainBrightness
     private const double Sqrt2 = 1.4142135623730951;
     private const double Sqrt5 = 2.23606797749979;
 
-    internal static float Compute(int rowY, int gridHeight, double simTime, in ColumnState column)
+    // Rain time drops by this much for each row down.
+    private const double RowStep = 0.01 / EngineConstants.RaindropLength;
+    private static readonly double Sin2Step = Math.Sin(Sqrt2 * RowStep);
+    private static readonly double Cos2Step = Math.Cos(Sqrt2 * RowStep);
+    private static readonly double Sin5Step = Math.Sin(Sqrt5 * RowStep);
+    private static readonly double Cos5Step = Math.Cos(Sqrt5 * RowStep);
+
+    /// <summary>
+    /// Rain wave brightness for the rows of one stream, top to bottom. Rain time falls by a fixed step per row,
+    /// so the two wobble sines advance by rotation: one SinCos pair per stream instead of two Math.Sin per cell.
+    /// </summary>
+    internal struct Stepper
     {
-        // Reference shader: glyphPos.y = 0 at bottom; terminal row 0 is top.
-        var glyphY = gridHeight - 1 - rowY;
-        var columnTime = column.TimeOffset + simTime * EngineConstants.RainFallSpeed * column.SpeedOffset;
-        var rainTime = (glyphY * 0.01 + columnTime) / EngineConstants.RaindropLength;
-        rainTime = Wobble(rainTime);
-        return (float)(1.0 - Frac(rainTime));
+        private double _rainTime;
+        private double _sin2, _cos2, _sin5, _cos5;
+
+        internal Stepper(int firstRowY, int gridHeight, double simTime, in ColumnState column)
+        {
+            // Reference shader: glyphPos.y = 0 at bottom; terminal row 0 is top.
+            var glyphY = gridHeight - 1 - firstRowY;
+            var columnTime = column.TimeOffset + simTime * EngineConstants.RainFallSpeed * column.SpeedOffset;
+            _rainTime = (glyphY * 0.01 + columnTime) / EngineConstants.RaindropLength;
+            (_sin2, _cos2) = Math.SinCos(Sqrt2 * _rainTime);
+            (_sin5, _cos5) = Math.SinCos(Sqrt5 * _rainTime);
+        }
+
+        /// <summary>Brightness for the current row, then moves one row down.</summary>
+        internal float Next()
+        {
+            // wobble(t) = t + 0.3 sin(sqrt(2) t) + 0.2 sin(sqrt(5) t)
+            var wobbled = _rainTime + 0.3 * _sin2 + 0.2 * _sin5;
+            _rainTime -= RowStep;
+            // sin(a - d) = sin a cos d - cos a sin d, cos(a - d) = cos a cos d + sin a sin d
+            (_sin2, _cos2) = (_sin2 * Cos2Step - _cos2 * Sin2Step, _cos2 * Cos2Step + _sin2 * Sin2Step);
+            (_sin5, _cos5) = (_sin5 * Cos5Step - _cos5 * Sin5Step, _cos5 * Cos5Step + _sin5 * Sin5Step);
+            return (float)(1.0 - Frac(wobbled));
+        }
     }
 
     internal static float ColumnTimeOffset(int columnX)
@@ -1130,9 +1159,6 @@ internal static class RainBrightness
 
     internal static float SpeedOffsetFromColumnSpeed(byte speed) =>
         0.5f + (speed - EngineConstants.MinSpeed) / (float)(EngineConstants.MaxSpeed - EngineConstants.MinSpeed) * 0.5f;
-
-    private static double Wobble(double x) =>
-        x + 0.3 * Math.Sin(Sqrt2 * x) + 0.2 * Math.Sin(Sqrt5 * x);
 
     private static double Frac(double x) => x - Math.Floor(x);
 }
@@ -1376,7 +1402,7 @@ internal sealed class AnsiPalette
 
     /// <summary>
     /// Brightness multiplier at a cell for the wave pattern: high near a sine curve that travels right, low elsewhere.
-    /// Cheap enough per cell next to <see cref="Dither"/>, which already calls Math.Sin per cell.
+    /// Calls Math.Sin and Math.Exp per cell, so wave renders slower than the other patterns.
     /// </summary>
     private static double WaveGain(int x, int y, int width, int height, ulong frameNumber)
     {
@@ -1595,10 +1621,27 @@ internal sealed class AnsiPalette
 
     private static int AppendDecimal(Span<byte> destination, int value)
     {
-        if (value == 0)
+        // Color components (0-255) and most row numbers take a direct path, written once per lit cell.
+        if ((uint)value < 10)
         {
-            destination[0] = (byte)'0';
+            destination[0] = (byte)('0' + value);
             return 1;
+        }
+
+        if ((uint)value < 100)
+        {
+            destination[1] = (byte)('0' + value % 10);
+            destination[0] = (byte)('0' + value / 10);
+            return 2;
+        }
+
+        if ((uint)value < 1000)
+        {
+            destination[2] = (byte)('0' + value % 10);
+            value /= 10;
+            destination[1] = (byte)('0' + value % 10);
+            destination[0] = (byte)('0' + value / 10);
+            return 3;
         }
 
         Span<byte> digits = stackalloc byte[10];
@@ -1721,10 +1764,16 @@ internal sealed class AnsiPalette
         buffer[pos++] = (byte)'H';
     }
 
+    /// <summary>White noise in [0, 1) per cell and frame, from an integer hash instead of a Math.Sin per cell.</summary>
     private static float Dither(int x, int y, ulong frame)
     {
-        var n = Math.Sin(x * 12.9898 + y * 78.233 + frame * 0.1) * 43758.5453;
-        return (float)(n - Math.Floor(n));
+        var h = (uint)x * 0x9E3779B1u ^ (uint)y * 0x85EBCA77u ^ (uint)frame * 0xC2B2AE3Du;
+        h ^= h >> 16;
+        h *= 0x7FEB352Du;
+        h ^= h >> 15;
+        h *= 0x846CA68Bu;
+        h ^= h >> 16;
+        return (h >> 8) * (1f / (1 << 24));
     }
 
     private static int Ansi16FgCode(ConsoleColor16 color) =>
@@ -1897,6 +1946,8 @@ internal sealed class MatrixEngine : IDisposable
     private readonly Random _rng = new();
 
     private Cell[] _grid = [];
+    /// <summary>Last frame's grid: cells that stay lit carry their glyph over from it.</summary>
+    private Cell[] _previousGrid = [];
     private ColumnState[] _columns = [];
     /// <summary>Per column: frames until the next stream enters at the top.</summary>
     private int[] _nextSpawnFrames = [];
@@ -1947,6 +1998,10 @@ internal sealed class MatrixEngine : IDisposable
                 Resize(width, height);
         }
 
+        // Every frame redraws all streams onto an empty grid, keeping the last frame for glyph carry-over.
+        // One contiguous clear is cheaper than clearing column by column.
+        (_grid, _previousGrid) = (_previousGrid, _grid);
+        Array.Clear(_grid, 0, _width * _height);
         for (var x = 0; x < _width; x++)
         {
             if (_wideColumns && (x & 1) == 1)
@@ -1987,6 +2042,7 @@ internal sealed class MatrixEngine : IDisposable
         if (_grid.Length > 0)
         {
             ArrayPool<Cell>.Shared.Return(_grid);
+            ArrayPool<Cell>.Shared.Return(_previousGrid);
             ArrayPool<ColumnState>.Shared.Return(_columns);
             ArrayPool<int>.Shared.Return(_nextSpawnFrames);
         }
@@ -1997,9 +2053,11 @@ internal sealed class MatrixEngine : IDisposable
         _pendingResizeHeight = newHeight;
         _pendingResizeStable = EngineConstants.ResizeStableFrames;
         _grid = ArrayPool<Cell>.Shared.Rent(_width * _height);
+        _previousGrid = ArrayPool<Cell>.Shared.Rent(_width * _height);
         _columns = ArrayPool<ColumnState>.Shared.Rent(_width * EngineConstants.MaxStreamsPerColumn);
         _nextSpawnFrames = ArrayPool<int>.Shared.Rent(_width);
         Array.Clear(_grid, 0, _width * _height);
+        Array.Clear(_previousGrid, 0, _width * _height);
 
         // Rain falls in from the top: each column's first stream enters within the first screen height of frames.
         // A column starts in a gap with probability (1 - density), so the visible fraction is near the target from the start.
@@ -2048,8 +2106,6 @@ internal sealed class MatrixEngine : IDisposable
 
     private void UpdateColumn(int x)
     {
-        ClearColumn(x);
-
         if (IsStreamColumn(x) && --_nextSpawnFrames[x] <= 0)
         {
             var freeSlot = -1;
@@ -2091,25 +2147,38 @@ internal sealed class MatrixEngine : IDisposable
         var headY = column.HeadY;
         var updateStart = Math.Max(0, trailTop);
         var updateEnd = Math.Min(headY, _height - 1);
+        var rain = new RainBrightness.Stepper(updateStart, _height, _simTime, column);
         for (var y = updateStart; y <= updateEnd; y++)
         {
             var dist = headY - y;
-            ref var cell = ref _grid[y * _width + x];
-            if (cell.State is (byte)CellState.Empty or (byte)CellState.Continuation)
-                cell.Glyph = _pool.Pick(_rng);
-
-            if (_rng.Next(100) < EngineConstants.GlyphMutationChance)
-                cell.Glyph = _pool.Pick(_rng);
-
-            var wave = RainBrightness.Compute(y, _height, _simTime, column);
+            var glyph = NextGlyph(y * _width + x);
+            var wave = rain.Next();
             wave = MathF.Max(wave, NearHeadWaveFloor(dist));
             var envelope = TrailEnvelope(dist, column.TrailLength);
             wave = EngineConstants.RainWaveMinimum + wave * (1f - EngineConstants.RainWaveMinimum);
             var brightness = wave * envelope;
             var cursorBoost = (byte)(dist == 0 ? 1 : 0);
             var brightnessByte = (byte)Math.Clamp((int)(brightness * 255), 0, 255);
-            SetDisplayGlyph(x, y, cell.Glyph, brightnessByte, cursorBoost);
+            SetDisplayGlyph(x, y, glyph, brightnessByte, cursorBoost);
         }
+    }
+
+    /// <summary>
+    /// A cell that stays lit keeps its glyph and changes with <see cref="EngineConstants.GlyphMutationChance"/>.
+    /// A cell that was dark last frame gets a fresh glyph.
+    /// </summary>
+    private char NextGlyph(int index)
+    {
+        // The column's other stream already drew this cell this frame: share its glyph.
+        ref readonly var current = ref _grid[index];
+        if (current.State == (byte)CellState.Glyph)
+            return current.Glyph;
+
+        ref readonly var previous = ref _previousGrid[index];
+        if (previous.State == (byte)CellState.Glyph && _rng.Next(100) >= EngineConstants.GlyphMutationChance)
+            return previous.Glyph;
+
+        return _pool.Pick(_rng);
     }
 
     /// <summary>1 at Head, 0 at trail tip. Gamma &lt; 1 keeps mid-trail brighter while the tip still fades out.</summary>
@@ -2152,23 +2221,6 @@ internal sealed class MatrixEngine : IDisposable
         }
     }
 
-    private void ClearDisplayCells(int x, int y)
-    {
-        ref var cell = ref _grid[y * _width + x];
-        cell.State = (byte)CellState.Empty;
-        cell.Glyph = '\0';
-        cell.Brightness = 0;
-        cell.CursorBoost = 0;
-        if (_wideColumns && x + 1 < _width)
-        {
-            ref var cont = ref _grid[y * _width + x + 1];
-            cont.State = (byte)CellState.Empty;
-            cont.Glyph = '\0';
-            cont.Brightness = 0;
-            cont.CursorBoost = 0;
-        }
-    }
-
     /// <summary>Start a stream whose head enters row 0 on this frame, and schedule the column's next stream.</summary>
     private void ActivateColumn(int x, int slot)
     {
@@ -2191,18 +2243,18 @@ internal sealed class MatrixEngine : IDisposable
         _nextSpawnFrames[x] = visibleFrames + NextGapFrames(visibleFrames);
     }
 
-    private void ClearColumn(int x)
-    {
-        for (var y = 0; y < _height; y++)
-            ClearDisplayCells(x, y);
-    }
-
     public void Dispose()
     {
         if (_grid.Length > 0)
         {
             ArrayPool<Cell>.Shared.Return(_grid);
             _grid = [];
+        }
+
+        if (_previousGrid.Length > 0)
+        {
+            ArrayPool<Cell>.Shared.Return(_previousGrid);
+            _previousGrid = [];
         }
 
         if (_columns.Length > 0)
