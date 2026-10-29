@@ -112,7 +112,7 @@ A non-ASCII `--char` needs UTF-8 output (see Windows console code page), and it 
 
 - The terminal is asked for its attributes (DA1). Soft fonts are used only when the reply lists attribute 7 (soft character sets) in a VT200-or-later class (first parameter 61-69).
 - Katakana is used when there is no VT output, stdin is not a tty, the reply lacks attribute 7, or no reply comes within 1 second. Older Windows Terminal draws soft fonts but replies `?1;0c`, so it gets katakana.
-- On Windows, DA1 is trusted only in Windows Terminal (`WT_SESSION`) and in a classic console window. Other terminals that host the program through ConPTY get katakana and a warning, without a query (see Lessons Learned: movie mode terminal detection).
+- On Windows, DA1 is trusted only in Windows Terminal (`WT_SESSION`) and in a classic console window. Other terminals that host the program through ConPTY get katakana and a warning, without a query. The same holds for WSL started by wsl.exe: DA1 is trusted only in Windows Terminal (see Lessons Learned: movie mode terminal detection).
 
 **Katakana rendering** (movie fallback and `--mode kana`)
 
@@ -275,6 +275,7 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 - **Symptom:** in the Claude desktop terminal panel (xterm.js, `TERM_PROGRAM=claude-desktop`), DA1 replied `?61;6;7;21;22;23;24;28;32;42c`, listing soft fonts, but the panel drew the plain ASCII codes.
 - **Cause:** on Windows, terminals other than a classic console window host programs through ConPTY. conhost sits in between and answers DA1 with its own attributes, not the hosting terminal's.
 - **Decision:** trust DA1 only when `WT_SESSION` is set or the console window is visible (a classic conhost window, which draws soft fonts itself). Under ConPTY the console window is a hidden pseudo window, so any other host gets katakana with a warning.
+- **WSL:** the same trap reached Linux. WSL started from that panel picked the soft font and drew ASCII codes, because wsl.exe also runs behind conhost and the window check exists only on Windows. A WSL process started by wsl.exe (`WSL_DISTRO_NAME` set) now trusts DA1 only with `WT_SESSION`, which Windows Terminal adds to `WSLENV` so WSL sees it. The console window cannot be checked from Linux, so WSL in a classic console window gets katakana too.
 
 ### Density and stutter
 

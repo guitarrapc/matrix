@@ -891,6 +891,12 @@ internal static partial class TerminalCapabilities
             return false;
         }
 
+        if (IsWslOutsideWindowsTerminal())
+        {
+            reason = "WSL outside Windows Terminal may run behind a Windows console host that answers terminal queries, so soft font (DECDLD) support cannot be checked";
+            return false;
+        }
+
         switch (QuerySoftFontSupport())
         {
             case true:
@@ -1011,6 +1017,18 @@ internal static partial class TerminalCapabilities
         var window = GetConsoleWindow();
         return window == IntPtr.Zero || !IsWindowVisible(window);
     }
+
+    /// <summary>
+    /// True for a WSL process started from Windows (wsl.exe sets WSL_DISTRO_NAME) outside Windows Terminal.
+    /// wsl.exe runs behind a Windows console host, which answers DA1 with its own attributes, so soft fonts are
+    /// listed even when the hosting terminal cannot draw them (the same trap as <see cref="IsBehindOtherPseudoConsoleHost"/>).
+    /// Windows Terminal adds WT_SESSION to WSLENV, so WSL inside it still sees WT_SESSION and stays trusted.
+    /// The console window cannot be checked from Linux, so a classic console window, which does draw soft fonts, gets katakana too.
+    /// </summary>
+    internal static bool IsWslOutsideWindowsTerminal() =>
+        OperatingSystem.IsLinux() &&
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WSL_DISTRO_NAME")) &&
+        string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_SESSION"));
 
     private static bool TryEnableWindowsVtInput(out Action restore)
     {
