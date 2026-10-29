@@ -2316,7 +2316,7 @@ internal static unsafe class NativeTermios
             return false;
 
         var raw = original;
-        raw.c_lflag &= ~(uint)(Echo | ICanon);
+        raw.c_lflag &= ~(EchoLinux | ICanonLinux);
         raw.c_cc[VMinLinux] = 0;
         raw.c_cc[VTimeLinux] = 0;
 
@@ -2334,7 +2334,7 @@ internal static unsafe class NativeTermios
             return false;
 
         var raw = original;
-        raw.c_lflag &= ~(uint)(Echo | ICanon);
+        raw.c_lflag &= ~(EchoMac | ICanonMac);
         raw.c_cc[VMinMac] = 0;
         raw.c_cc[VTimeMac] = 0;
 
@@ -2351,24 +2351,35 @@ internal static unsafe class NativeTermios
         if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
             return false;
 
-        var available = 0;
-        var ioctlRequest = OperatingSystem.IsLinux() ? FionReadLinux : FionReadMacOS;
-        if (ioctl(StdinFileno, ioctlRequest, ref available) != 0 || available <= 0)
+        // ioctl(FIONREAD) is variadic, and Apple's arm64 ABI passes variadic arguments on the stack,
+        // so a plain P/Invoke hands the kernel a garbage pointer and corrupts memory. poll is not variadic.
+        var pollFd = new PollFd { fd = StdinFileno, events = PollIn };
+        if (poll(ref pollFd, 1, 0) <= 0 || (pollFd.revents & PollIn) == 0)
             return false;
 
         bytesRead = read(StdinFileno, ref MemoryMarshal.GetReference(buffer), buffer.Length);
         return bytesRead > 0;
     }
 
-    private const uint Echo = 8;
-    private const uint ICanon = 2;
+    // Local-flag bit values differ between Linux and BSD-derived macOS (ICANON is 0x2 on Linux, 0x100 on macOS).
+    private const uint EchoLinux = 0x8;
+    private const uint ICanonLinux = 0x2;
+    private const ulong EchoMac = 0x8;
+    private const ulong ICanonMac = 0x100;
     private const int TcsaNow = 0;
     private const int VMinLinux = 6;
     private const int VTimeLinux = 5;
     private const int VMinMac = 16;
     private const int VTimeMac = 17;
-    private const uint FionReadLinux = 0x541B;
-    private const uint FionReadMacOS = 0x4004667F;
+    private const short PollIn = 0x0001;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PollFd
+    {
+        internal int fd;
+        internal short events;
+        internal short revents;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct TermiosLinux
@@ -2412,7 +2423,7 @@ internal static unsafe class NativeTermios
         tcsetattr(fd, optionalActions, ref termios);
 
     [DllImport("libc", SetLastError = true)]
-    private static extern int ioctl(int fd, uint request, ref int argp);
+    private static extern int poll(ref PollFd fds, nuint nfds, int timeout);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int read(int fd, ref byte buffer, int count);
