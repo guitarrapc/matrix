@@ -50,8 +50,9 @@ matrix --bg "#080300" --head "#FFF3D0" --bright "#FF9F1A" --dim "#5A2100"
 # Change frame rate. Higher FPS also makes rain move faster in real time. Default is 14.
 matrix --fps 10
 
-# Use one repeated character.
+# Use one repeated character. Full-width characters such as "ア" use two cells per column.
 matrix --char "λ"
+matrix --char "ア"
 ```
 
 **Usage**

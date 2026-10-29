@@ -84,13 +84,18 @@ if (!keyExitEnabled)
     Console.Error.WriteLine("warning: stdin is not a tty. key exit disabled, using duration only");
 }
 
+// Frames are written as UTF-8 bytes. On Windows the console reads them in its output code page (932, 437, ...
+// by default), so switch it to UTF-8 for the run. The original code page comes back with the rest of the terminal state.
+var utf8Output = ConsoleCodePage.TrySwitchToUtf8(out var restoreCodePage);
+
 GlyphPool pool;
 try
 {
-    pool = GlyphPool.Create(glyphMode, options.SingleChar);
+    pool = GlyphPool.Create(glyphMode, options.SingleChar, utf8Output);
 }
 catch (InvalidOperationException ex)
 {
+    restoreCodePage();
     Console.Error.Write("Error: ");
     Console.Error.WriteLine(ex.Message);
     Environment.Exit(1);
@@ -101,7 +106,7 @@ var palette = AnsiPalette.Create(options.Colors, colorMode, cursorIntensity);
 using var engine = new MatrixEngine(pool, palette, density, options.Fps);
 using var pacer = new FramePacer(options.Fps);
 
-var restore = TerminalSession.Enter(keyExitEnabled, softFont: glyphMode == GlyphMode.MovieSoftFont);
+var restore = TerminalSession.Enter(keyExitEnabled, softFont: glyphMode == GlyphMode.MovieSoftFont, restoreCodePage);
 var exitRequested = false;
 
 Console.CancelKeyPress += (_, e) =>
@@ -181,7 +186,7 @@ internal static class EngineConstants
     internal const int DefaultTargetFps = 14;
     internal const int MinTargetFps = 1;
     internal const int MaxTargetFps = 60;
-    internal const int GlyphMutationChance = 35;
+    internal const int GlyphMutationChance = 10;
     internal const int MinSpeed = 1;
     internal const int MaxSpeed = 2;
     internal const double DefaultDensity = 0.55;
@@ -352,6 +357,8 @@ internal sealed class CliOptions
                         return Error("missing value for --char");
                     if (args[i].Length != 1)
                         return Error("--char requires exactly one character");
+                    if (!IsDrawableChar(args[i][0]))
+                        return Error("--char requires a visible character, not a control, format, or combining character");
                     hasChar = true;
                     singleChar = args[i][0];
                     break;
@@ -456,6 +463,25 @@ internal sealed class CliOptions
     }
 
     private static CliOptions Error(string message) => new() { ErrorMessage = message };
+
+    /// <summary>
+    /// False for characters that do not draw as one glyph of their own: controls move the cursor (tab, newline),
+    /// format characters are invisible (zero-width space, joiners), combining marks draw on the previous cell,
+    /// line and paragraph separators break the row, and a lone surrogate is not a character at all.
+    /// Any of them would shift or break the grid.
+    /// </summary>
+    internal static bool IsDrawableChar(char c) => System.Globalization.CharUnicodeInfo.GetUnicodeCategory(c) switch
+    {
+        System.Globalization.UnicodeCategory.Control => false,
+        System.Globalization.UnicodeCategory.Format => false,
+        System.Globalization.UnicodeCategory.Surrogate => false,
+        System.Globalization.UnicodeCategory.NonSpacingMark => false,
+        System.Globalization.UnicodeCategory.SpacingCombiningMark => false,
+        System.Globalization.UnicodeCategory.EnclosingMark => false,
+        System.Globalization.UnicodeCategory.LineSeparator => false,
+        System.Globalization.UnicodeCategory.ParagraphSeparator => false,
+        _ => true,
+    };
 
     private static bool TryParseDuration(ReadOnlySpan<char> text, out double seconds)
     {
@@ -865,6 +891,12 @@ internal static partial class TerminalCapabilities
             return false;
         }
 
+        if (IsWslOutsideWindowsTerminal())
+        {
+            reason = "WSL outside Windows Terminal may run behind a Windows console host that answers terminal queries, so soft font (DECDLD) support cannot be checked";
+            return false;
+        }
+
         switch (QuerySoftFontSupport())
         {
             case true:
@@ -985,6 +1017,18 @@ internal static partial class TerminalCapabilities
         var window = GetConsoleWindow();
         return window == IntPtr.Zero || !IsWindowVisible(window);
     }
+
+    /// <summary>
+    /// True for a WSL process started from Windows (wsl.exe sets WSL_DISTRO_NAME) outside Windows Terminal.
+    /// wsl.exe runs behind a Windows console host, which answers DA1 with its own attributes, so soft fonts are
+    /// listed even when the hosting terminal cannot draw them (the same trap as <see cref="IsBehindOtherPseudoConsoleHost"/>).
+    /// Windows Terminal adds WT_SESSION to WSLENV, so WSL inside it still sees WT_SESSION and stays trusted.
+    /// The console window cannot be checked from Linux, so a classic console window, which does draw soft fonts, gets katakana too.
+    /// </summary>
+    internal static bool IsWslOutsideWindowsTerminal() =>
+        OperatingSystem.IsLinux() &&
+        !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WSL_DISTRO_NAME")) &&
+        string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WT_SESSION"));
 
     private static bool TryEnableWindowsVtInput(out Action restore)
     {
@@ -1112,14 +1156,43 @@ internal static class RainBrightness
     private const double Sqrt2 = 1.4142135623730951;
     private const double Sqrt5 = 2.23606797749979;
 
-    internal static float Compute(int rowY, int gridHeight, double simTime, in ColumnState column)
+    // Rain time drops by this much for each row down.
+    private const double RowStep = 0.01 / EngineConstants.RaindropLength;
+    private static readonly double Sin2Step = Math.Sin(Sqrt2 * RowStep);
+    private static readonly double Cos2Step = Math.Cos(Sqrt2 * RowStep);
+    private static readonly double Sin5Step = Math.Sin(Sqrt5 * RowStep);
+    private static readonly double Cos5Step = Math.Cos(Sqrt5 * RowStep);
+
+    /// <summary>
+    /// Rain wave brightness for the rows of one stream, top to bottom. Rain time falls by a fixed step per row,
+    /// so the two wobble sines advance by rotation: one SinCos pair per stream instead of two Math.Sin per cell.
+    /// </summary>
+    internal struct Stepper
     {
-        // Reference shader: glyphPos.y = 0 at bottom; terminal row 0 is top.
-        var glyphY = gridHeight - 1 - rowY;
-        var columnTime = column.TimeOffset + simTime * EngineConstants.RainFallSpeed * column.SpeedOffset;
-        var rainTime = (glyphY * 0.01 + columnTime) / EngineConstants.RaindropLength;
-        rainTime = Wobble(rainTime);
-        return (float)(1.0 - Frac(rainTime));
+        private double _rainTime;
+        private double _sin2, _cos2, _sin5, _cos5;
+
+        internal Stepper(int firstRowY, int gridHeight, double simTime, in ColumnState column)
+        {
+            // Reference shader: glyphPos.y = 0 at bottom; terminal row 0 is top.
+            var glyphY = gridHeight - 1 - firstRowY;
+            var columnTime = column.TimeOffset + simTime * EngineConstants.RainFallSpeed * column.SpeedOffset;
+            _rainTime = (glyphY * 0.01 + columnTime) / EngineConstants.RaindropLength;
+            (_sin2, _cos2) = Math.SinCos(Sqrt2 * _rainTime);
+            (_sin5, _cos5) = Math.SinCos(Sqrt5 * _rainTime);
+        }
+
+        /// <summary>Brightness for the current row, then moves one row down.</summary>
+        internal float Next()
+        {
+            // wobble(t) = t + 0.3 sin(sqrt(2) t) + 0.2 sin(sqrt(5) t)
+            var wobbled = _rainTime + 0.3 * _sin2 + 0.2 * _sin5;
+            _rainTime -= RowStep;
+            // sin(a - d) = sin a cos d - cos a sin d, cos(a - d) = cos a cos d + sin a sin d
+            (_sin2, _cos2) = (_sin2 * Cos2Step - _cos2 * Sin2Step, _cos2 * Cos2Step + _sin2 * Sin2Step);
+            (_sin5, _cos5) = (_sin5 * Cos5Step - _cos5 * Sin5Step, _cos5 * Cos5Step + _sin5 * Sin5Step);
+            return (float)(1.0 - Frac(wobbled));
+        }
     }
 
     internal static float ColumnTimeOffset(int columnX)
@@ -1130,9 +1203,6 @@ internal static class RainBrightness
 
     internal static float SpeedOffsetFromColumnSpeed(byte speed) =>
         0.5f + (speed - EngineConstants.MinSpeed) / (float)(EngineConstants.MaxSpeed - EngineConstants.MinSpeed) * 0.5f;
-
-    private static double Wobble(double x) =>
-        x + 0.3 * Math.Sin(Sqrt2 * x) + 0.2 * Math.Sin(Sqrt5 * x);
 
     private static double Frac(double x) => x - Math.Floor(x);
 }
@@ -1152,6 +1222,40 @@ internal sealed class BrightnessPalette
     internal Rgb HeadColor => _head;
 
     internal Rgb Sample(byte brightnessIndex) => _lut[brightnessIndex];
+
+    // Nearest 16-color name of each LUT entry, built only for 16-color output.
+    private ConsoleColor16[]? _namedLut;
+
+    /// <summary>Precomputes the nearest 16-color name of every LUT entry, so 16-color frames skip the per-cell search.</summary>
+    internal void BuildNamedLut()
+    {
+        _namedLut = new ConsoleColor16[_lut.Length];
+        for (var i = 0; i < _lut.Length; i++)
+            _namedLut[i] = ColorParser.NearestNamed(_lut[i]);
+    }
+
+    internal ConsoleColor16 SampleNamed(byte brightnessIndex) => _namedLut![brightnessIndex];
+
+    // Room for the longest true color foreground sequence, "\e[38;2;255;255;255m" (19 bytes).
+    private const int FgSequenceStride = 20;
+    // Pre-encoded true color foreground sequence of each LUT entry, built only for true color output.
+    private byte[]? _fgSequences;
+    private byte[]? _fgSequenceLengths;
+
+    /// <summary>Encodes every LUT entry's foreground sequence once, so true color frames copy instead of formatting digits.</summary>
+    internal void BuildFgSequences()
+    {
+        _fgSequences = new byte[_lut.Length * FgSequenceStride];
+        _fgSequenceLengths = new byte[_lut.Length];
+        for (var i = 0; i < _lut.Length; i++)
+        {
+            AnsiPalette.WriteTrueColorSequence(_fgSequences.AsSpan(i * FgSequenceStride, FgSequenceStride), isBackground: false, _lut[i], out var length);
+            _fgSequenceLengths[i] = (byte)length;
+        }
+    }
+
+    internal ReadOnlySpan<byte> FgSequence(byte brightnessIndex) =>
+        _fgSequences.AsSpan(brightnessIndex * FgSequenceStride, _fgSequenceLengths![brightnessIndex]);
 
     private static void BuildLut(Span<Rgb> lut, Rgb bright, Rgb dim, Rgb bg, Rgb? hot)
     {
@@ -1228,7 +1332,6 @@ internal sealed class AnsiPalette
     private readonly byte[] _clearEol = "\u001b[K"u8.ToArray();
     private readonly byte[] _bgRowPrefix;
     private readonly byte[] _rowFgReset;
-    private readonly byte[] _space = " "u8.ToArray();
     private readonly BrightnessPalette _palette;
     private readonly BrightnessPalette[]? _bandPalettes;
     private readonly TerminalColorMode _colorMode;
@@ -1237,6 +1340,13 @@ internal sealed class AnsiPalette
     private readonly BandLayout _bandLayout;
     // Brightness multiplier per frame for one heartbeat, or null when the pattern does not pulse.
     private readonly double[]? _pulseCurve;
+    // Most bytes one cell can write: a foreground sequence plus a glyph. Blanks and wide-glyph pairs write less.
+    private readonly int _maxCellBytes;
+
+    // "\e[" + up to 10 digits + ";1H": the cursor move written before every row after the first.
+    private const int MaxCupBytes = 15;
+    // A char is at most 3 bytes in UTF-8.
+    private const int MaxGlyphBytes = 3;
 
     // One heartbeat every 20 frames, about 1.4 seconds (a slow ~42 bpm) at the default 14 fps.
     private const int PulseFrames = 20;
@@ -1245,6 +1355,8 @@ internal sealed class AnsiPalette
 
     // Whether a sine-shaped band of light sweeps across the rain (wave).
     private readonly bool _wave;
+    // Wave crest row per column for the frame being written, sized to the widest grid seen.
+    private double[] _waveCrests = [];
 
     // The crest moves one wavelength to the right every 42 frames, about 3 seconds at the default 14 fps.
     private const int WaveFramesPerWavelength = 42;
@@ -1259,6 +1371,9 @@ internal sealed class AnsiPalette
     // so the faint trail cells the band passes through light up too.
     private const double WaveRest = 0.5;
     private const double WavePeak = 1.3;
+    // Squared crest distance past which the crest term is below half an ulp of WaveRest:
+    // 0.8 * exp(-38) is about 2.5e-17, half an ulp of 0.5 is about 5.6e-17. Recheck if WaveRest or WavePeak change.
+    private const double WaveExpCutoff = 38;
 
     // A cycle band moves one column-band to the right every this many frames.
     // 48 bands x 2 frames is one full hue loop in about 7 seconds at the default 14 fps.
@@ -1297,6 +1412,23 @@ internal sealed class AnsiPalette
         _colorMode = colorMode;
         _cursorAddend = cursorAddend;
         _bandCursorAddends = bandCursorAddends;
+
+        // Measure the longest foreground sequence with the same writers WriteFrame uses:
+        // "\e[38;2;255;255;255m" for true color, "\e[97m" for 16 colors (every 16-color code has two digits).
+        Span<byte> scratch = stackalloc byte[32];
+        var maxFgBytes = 0;
+        if (colorMode == TerminalColorMode.TrueColor)
+            WriteTrueColorSequence(scratch, isBackground: false, new Rgb(255, 255, 255), out maxFgBytes);
+        else if (colorMode == TerminalColorMode.Ansi16)
+            WriteAnsi16Sequence(scratch, Ansi16FgCode(ConsoleColor16.White), out maxFgBytes);
+        _maxCellBytes = maxFgBytes + MaxGlyphBytes;
+    }
+
+    /// <summary>Upper bound on the bytes <see cref="WriteFrame"/> writes for a width x height grid.</summary>
+    internal int MaxFrameBytes(int width, int height)
+    {
+        var rowBytes = MaxCupBytes + _bgRowPrefix.Length + _rowFgReset.Length + _clearEol.Length + width * _maxCellBytes;
+        return _syncStart.Length + _home.Length + _syncEnd.Length + height * rowBytes;
     }
 
     internal static AnsiPalette Create(ColorOptions colors, TerminalColorMode colorMode, double cursorIntensity)
@@ -1338,6 +1470,14 @@ internal sealed class AnsiPalette
                 bandCursorAddends[i] = BrightnessPalette.ScaleRgb(bandPalettes[i].HeadColor, cursorIntensity);
         }
 
+        // Per-entry output tables for the color mode, so frames skip per-cell color encoding.
+        BuildOutputTables(palette, colorMode);
+        if (bandPalettes is not null)
+        {
+            foreach (var bandPalette in bandPalettes)
+                BuildOutputTables(bandPalette, colorMode);
+        }
+
         var bandLayout = colors.Pattern switch
         {
             ColorPattern.Fire => BandLayout.Rows,
@@ -1351,19 +1491,35 @@ internal sealed class AnsiPalette
     }
 
     /// <summary>
-    /// Brightness multiplier at a cell for the wave pattern: high near a sine curve that travels right, low elsewhere.
-    /// Cheap enough per cell next to <see cref="Dither"/>, which already calls Math.Sin per cell.
+    /// Fills the crest row of each column for this frame: a sine curve that travels right.
+    /// The crest depends only on the column, so Math.Sin runs once per column instead of once per cell.
+    /// Returns the light band half-thickness.
     /// </summary>
-    private static double WaveGain(int x, int y, int width, int height, ulong frameNumber)
+    private double PrepareWaveCrests(int width, int height, ulong frameNumber)
     {
+        if (_waveCrests.Length < width)
+            _waveCrests = new double[width];
+
         var wavelength = Math.Max(WaveMinWavelength, width / 2.0);
         var travel = (frameNumber % WaveFramesPerWavelength) / (double)WaveFramesPerWavelength;
-        // Subtracting travel moves the crest toward larger x as frames advance.
-        var phase = 2 * Math.PI * (x / wavelength - travel);
-        var crest = (height - 1) * 0.5 + height * WaveAmplitude * Math.Sin(phase);
-        var thickness = Math.Max(WaveMinThickness, height * WaveThickness);
+        for (var x = 0; x < width; x++)
+        {
+            // Subtracting travel moves the crest toward larger x as frames advance.
+            var phase = 2 * Math.PI * (x / wavelength - travel);
+            _waveCrests[x] = (height - 1) * 0.5 + height * WaveAmplitude * Math.Sin(phase);
+        }
+
+        return Math.Max(WaveMinThickness, height * WaveThickness);
+    }
+
+    /// <summary>Brightness multiplier at a cell for the wave pattern: high near the crest, low elsewhere.</summary>
+    private static double WaveGain(int y, double crest, double thickness)
+    {
         var d = (y - crest) / thickness;
-        return WaveRest + (WavePeak - WaveRest) * Math.Exp(-d * d);
+        var d2 = d * d;
+        // Past this distance (WavePeak - WaveRest) * exp(-d2) is under half an ulp of WaveRest,
+        // so adding it changes no bit and Math.Exp can be skipped.
+        return d2 > WaveExpCutoff ? WaveRest : WaveRest + (WavePeak - WaveRest) * Math.Exp(-d2);
     }
 
     /// <summary>
@@ -1501,6 +1657,14 @@ internal sealed class AnsiPalette
         return palettes;
     }
 
+    private static void BuildOutputTables(BrightnessPalette palette, TerminalColorMode colorMode)
+    {
+        if (colorMode == TerminalColorMode.TrueColor)
+            palette.BuildFgSequences();
+        else if (colorMode == TerminalColorMode.Ansi16)
+            palette.BuildNamedLut();
+    }
+
     private static Rgb ResolveRgb(ColorValue color) => color.Rgb;
 
     private static ConsoleColor16 ResolveNamed(ColorValue color)
@@ -1527,7 +1691,7 @@ internal sealed class AnsiPalette
         return scratch[..length].ToArray();
     }
 
-    private static void WriteTrueColorSequence(Span<byte> scratch, bool isBackground, Rgb rgb, out int length)
+    internal static void WriteTrueColorSequence(Span<byte> scratch, bool isBackground, Rgb rgb, out int length)
     {
         scratch[0] = 0x1B;
         scratch[1] = (byte)'[';
@@ -1571,10 +1735,27 @@ internal sealed class AnsiPalette
 
     private static int AppendDecimal(Span<byte> destination, int value)
     {
-        if (value == 0)
+        // Color components (0-255) and most row numbers take a direct path, written once per lit cell.
+        if ((uint)value < 10)
         {
-            destination[0] = (byte)'0';
+            destination[0] = (byte)('0' + value);
             return 1;
+        }
+
+        if ((uint)value < 100)
+        {
+            destination[1] = (byte)('0' + value % 10);
+            destination[0] = (byte)('0' + value / 10);
+            return 2;
+        }
+
+        if ((uint)value < 1000)
+        {
+            destination[2] = (byte)('0' + value % 10);
+            value /= 10;
+            destination[1] = (byte)('0' + value % 10);
+            destination[0] = (byte)('0' + value / 10);
+            return 3;
         }
 
         Span<byte> digits = stackalloc byte[10];
@@ -1599,11 +1780,11 @@ internal sealed class AnsiPalette
         var pos = 0;
         AppendBytes(buffer, ref pos, _syncStart);
         AppendBytes(buffer, ref pos, _home);
-        Span<byte> fgScratch = stackalloc byte[32];
 
         // Pulse dims both the rain and the head bloom together, so heads do not stay lit between beats.
         var pulse = _pulseCurve is null ? 1.0 : _pulseCurve[(int)(frameNumber % (ulong)_pulseCurve.Length)];
         var frameCursorAddend = _pulseCurve is null ? _cursorAddend : BrightnessPalette.ScaleRgb(_cursorAddend, pulse);
+        var waveThickness = _wave ? PrepareWaveCrests(width, height, frameNumber) : 0;
 
         for (var y = 0; y < height; y++)
         {
@@ -1614,8 +1795,8 @@ internal sealed class AnsiPalette
             AppendBytes(buffer, ref pos, _rowFgReset);
 
             var row = y * width;
-            Rgb lastFgRgb = default;
-            var hasLastFgRgb = false;
+            // Foreground last written in this row: packed RGB for true color, the 16-color name for 16 colors, -1 for none.
+            var lastFg = -1;
 
             for (var x = 0; x < width; x++)
             {
@@ -1635,16 +1816,18 @@ internal sealed class AnsiPalette
                         continue;
                     }
 
-                    AppendBytes(buffer, ref pos, _space);
+                    // Written directly: a one-byte span copy costs more than the write itself.
+                    buffer[pos++] = (byte)' ';
                     continue;
                 }
 
                 var brightness = cell.Brightness / 255.0;
                 brightness -= Dither(x, y, frameNumber) * (EngineConstants.DitherMagnitude / 3.0);
-                var gain = _wave ? pulse * WaveGain(x, y, width, height, frameNumber) : pulse;
+                var gain = _wave ? pulse * WaveGain(y, _waveCrests[x], waveThickness) : pulse;
                 brightness = Math.Clamp(brightness * gain, 0, 1);
                 var palette = SelectPalette(x, y, width, height, frameNumber, out var band);
-                var rgb = palette.Sample((byte)(brightness * 255));
+                var lutIndex = (byte)(brightness * 255);
+                var rgb = palette.Sample(lutIndex);
                 if (cell.CursorBoost != 0)
                 {
                     var cursorAddend = SelectCursorAddend(band, frameCursorAddend);
@@ -1656,23 +1839,33 @@ internal sealed class AnsiPalette
 
                 if (_colorMode == TerminalColorMode.TrueColor)
                 {
-                    if (!hasLastFgRgb || rgb.R != lastFgRgb.R || rgb.G != lastFgRgb.G || rgb.B != lastFgRgb.B)
+                    var fg = (rgb.R << 16) | (rgb.G << 8) | rgb.B;
+                    if (fg != lastFg)
                     {
-                        WriteTrueColorSequence(fgScratch, isBackground: false, rgb, out var fgLen);
-                        AppendBytes(buffer, ref pos, fgScratch[..fgLen]);
-                        lastFgRgb = rgb;
-                        hasLastFgRgb = true;
+                        // Other cells copy the LUT entry's pre-encoded sequence. Heads add the cursor bloom, so theirs is encoded here.
+                        if (cell.CursorBoost == 0)
+                        {
+                            AppendBytes(buffer, ref pos, palette.FgSequence(lutIndex));
+                        }
+                        else
+                        {
+                            WriteTrueColorSequence(buffer.AsSpan(pos), isBackground: false, rgb, out var fgLen);
+                            pos += fgLen;
+                        }
+
+                        lastFg = fg;
                     }
                 }
                 else if (_colorMode == TerminalColorMode.Ansi16)
                 {
-                    if (!hasLastFgRgb || rgb.R != lastFgRgb.R || rgb.G != lastFgRgb.G || rgb.B != lastFgRgb.B)
+                    // Many RGB values map to one 16-color name, so dedupe on the name. Only heads add the
+                    // cursor bloom on top of the LUT color, so only they need the live nearest-color search.
+                    var named = cell.CursorBoost != 0 ? ColorParser.NearestNamed(rgb) : palette.SampleNamed(lutIndex);
+                    if ((int)named != lastFg)
                     {
-                        var fgCode = Ansi16FgCode(ColorParser.NearestNamed(rgb));
-                        WriteAnsi16Sequence(fgScratch, fgCode, out var fgLen);
-                        AppendBytes(buffer, ref pos, fgScratch[..fgLen]);
-                        lastFgRgb = rgb;
-                        hasLastFgRgb = true;
+                        WriteAnsi16Sequence(buffer.AsSpan(pos), Ansi16FgCode(named), out var fgLen);
+                        pos += fgLen;
+                        lastFg = (int)named;
                     }
                 }
 
@@ -1697,10 +1890,16 @@ internal sealed class AnsiPalette
         buffer[pos++] = (byte)'H';
     }
 
+    /// <summary>White noise in [0, 1) per cell and frame, from an integer hash instead of a Math.Sin per cell.</summary>
     private static float Dither(int x, int y, ulong frame)
     {
-        var n = Math.Sin(x * 12.9898 + y * 78.233 + frame * 0.1) * 43758.5453;
-        return (float)(n - Math.Floor(n));
+        var h = (uint)x * 0x9E3779B1u ^ (uint)y * 0x85EBCA77u ^ (uint)frame * 0xC2B2AE3Du;
+        h ^= h >> 16;
+        h *= 0x7FEB352Du;
+        h ^= h >> 15;
+        h *= 0x846CA68Bu;
+        h ^= h >> 16;
+        return (h >> 8) * (1f / (1 << 24));
     }
 
     private static int Ansi16FgCode(ConsoleColor16 color) =>
@@ -1800,14 +1999,19 @@ internal sealed class GlyphPool
         RequiresWideColumns = requiresWideColumns;
     }
 
-    internal static GlyphPool Create(GlyphMode mode, char singleChar)
+    /// <param name="utf8Output">Whether the terminal reads output as UTF-8, required for any non-ASCII glyph.</param>
+    internal static GlyphPool Create(GlyphMode mode, char singleChar, bool utf8Output)
     {
         switch (mode)
         {
             case GlyphMode.Single:
-                return new GlyphPool(string.Empty, singleChar, true, GlyphMode.Single, requiresWideColumns: false);
+                if (singleChar > 0x7F && !utf8Output)
+                    throw new InvalidOperationException("--char with a non-ASCII character requires a UTF-8 capable terminal");
+                // A full-width character takes two display cells, so it uses the katakana layout.
+                return new GlyphPool(string.Empty, singleChar, true, GlyphMode.Single, requiresWideColumns: IsWide(singleChar));
             case GlyphMode.Movie:
-                EnsureUtf8();
+                if (!utf8Output)
+                    throw new InvalidOperationException("movie mode requires a UTF-8 capable terminal");
                 return new GlyphPool(MovieKatakanaChars, '\0', false, GlyphMode.Movie, requiresWideColumns: true);
             case GlyphMode.MovieSoftFont:
                 // Plain ASCII codes, the terminal draws them with the soft font loaded by MatrixSoftFont.
@@ -1817,21 +2021,26 @@ internal sealed class GlyphPool
         }
     }
 
-    private static void EnsureUtf8()
+    /// <summary>
+    /// True for East Asian Wide and Fullwidth characters, which terminals draw two cells wide:
+    /// Hangul Jamo, CJK symbols and punctuation, kana, CJK ideographs, Yi, Hangul syllables, and fullwidth forms.
+    /// Ambiguous-width characters such as Greek letters count as narrow, as Windows Terminal and most terminals draw them.
+    /// </summary>
+    internal static bool IsWide(char c) => c switch
     {
-        try
-        {
-            Console.OutputEncoding = Encoding.UTF8;
-            Console.InputEncoding = Encoding.UTF8;
-        }
-        catch (Exception)
-        {
-            throw new InvalidOperationException("movie mode requires a UTF-8 capable terminal");
-        }
-
-        if (!Encoding.UTF8.Equals(Console.OutputEncoding))
-            throw new InvalidOperationException("movie mode requires a UTF-8 capable terminal");
-    }
+        >= 'ᄀ' and <= 'ᅟ' => true,
+        >= '⺀' and <= '〾' => true,
+        >= 'ぁ' and <= '㏿' => true,
+        >= '㐀' and <= '䶿' => true,
+        >= '一' and <= '鿿' => true,
+        >= 'ꀀ' and <= '꓏' => true,
+        >= '가' and <= '힣' => true,
+        >= '豈' and <= '﫿' => true,
+        >= '︰' and <= '﹏' => true,
+        >= '＀' and <= '｠' => true,
+        >= '￠' and <= '￦' => true,
+        _ => false,
+    };
 
     internal char Pick(Random rng)
     {
@@ -1873,9 +2082,13 @@ internal sealed class MatrixEngine : IDisposable
     private readonly Random _rng = new();
 
     private Cell[] _grid = [];
+    /// <summary>Last frame's grid: cells that stay lit carry their glyph over from it.</summary>
+    private Cell[] _previousGrid = [];
     private ColumnState[] _columns = [];
     /// <summary>Per column: frames until the next stream enters at the top.</summary>
     private int[] _nextSpawnFrames = [];
+    /// <summary>Trail envelope per trail length, indexed by distance from the Head. Filled on resize.</summary>
+    private float[]?[] _envelopes = [];
     private byte[] _renderBuffer = [];
     private int _width;
     private int _height;
@@ -1923,6 +2136,10 @@ internal sealed class MatrixEngine : IDisposable
                 Resize(width, height);
         }
 
+        // Every frame redraws all streams onto an empty grid, keeping the last frame for glyph carry-over.
+        // One contiguous clear is cheaper than clearing column by column.
+        (_grid, _previousGrid) = (_previousGrid, _grid);
+        Array.Clear(_grid, 0, _width * _height);
         for (var x = 0; x < _width; x++)
         {
             if (_wideColumns && (x & 1) == 1)
@@ -1944,7 +2161,7 @@ internal sealed class MatrixEngine : IDisposable
 
     internal void Render(Stream stdout)
     {
-        var needed = _width * _height * 72 + _height * 24 + 96;
+        var needed = _palette.MaxFrameBytes(_width, _height);
         if (_renderBuffer.Length < needed)
         {
             if (_renderBuffer.Length > 0)
@@ -1963,6 +2180,7 @@ internal sealed class MatrixEngine : IDisposable
         if (_grid.Length > 0)
         {
             ArrayPool<Cell>.Shared.Return(_grid);
+            ArrayPool<Cell>.Shared.Return(_previousGrid);
             ArrayPool<ColumnState>.Shared.Return(_columns);
             ArrayPool<int>.Shared.Return(_nextSpawnFrames);
         }
@@ -1973,13 +2191,16 @@ internal sealed class MatrixEngine : IDisposable
         _pendingResizeHeight = newHeight;
         _pendingResizeStable = EngineConstants.ResizeStableFrames;
         _grid = ArrayPool<Cell>.Shared.Rent(_width * _height);
+        _previousGrid = ArrayPool<Cell>.Shared.Rent(_width * _height);
         _columns = ArrayPool<ColumnState>.Shared.Rent(_width * EngineConstants.MaxStreamsPerColumn);
         _nextSpawnFrames = ArrayPool<int>.Shared.Rent(_width);
         Array.Clear(_grid, 0, _width * _height);
+        Array.Clear(_previousGrid, 0, _width * _height);
 
         // Rain falls in from the top: each column's first stream enters within the first screen height of frames.
         // A column starts in a gap with probability (1 - density), so the visible fraction is near the target from the start.
         var (minTrail, maxTrail) = TrailLengthRange();
+        EnsureEnvelopes(minTrail, maxTrail);
         var avgTrail = (minTrail + maxTrail) / 2;
         var typicalVisibleFrames = (StreamVisibleFrames(avgTrail, EngineConstants.MinSpeed) + StreamVisibleFrames(avgTrail, EngineConstants.MaxSpeed)) / 2;
         for (var x = 0; x < _width; x++)
@@ -2024,8 +2245,6 @@ internal sealed class MatrixEngine : IDisposable
 
     private void UpdateColumn(int x)
     {
-        ClearColumn(x);
-
         if (IsStreamColumn(x) && --_nextSpawnFrames[x] <= 0)
         {
             var freeSlot = -1;
@@ -2067,24 +2286,60 @@ internal sealed class MatrixEngine : IDisposable
         var headY = column.HeadY;
         var updateStart = Math.Max(0, trailTop);
         var updateEnd = Math.Min(headY, _height - 1);
+        var rain = new RainBrightness.Stepper(updateStart, _height, _simTime, column);
+        var envelopes = _envelopes[column.TrailLength]!;
         for (var y = updateStart; y <= updateEnd; y++)
         {
             var dist = headY - y;
-            ref var cell = ref _grid[y * _width + x];
-            if (cell.State is (byte)CellState.Empty or (byte)CellState.Continuation)
-                cell.Glyph = _pool.Pick(_rng);
-
-            if (_rng.Next(100) < EngineConstants.GlyphMutationChance)
-                cell.Glyph = _pool.Pick(_rng);
-
-            var wave = RainBrightness.Compute(y, _height, _simTime, column);
+            var glyph = NextGlyph(y * _width + x);
+            var wave = rain.Next();
             wave = MathF.Max(wave, NearHeadWaveFloor(dist));
-            var envelope = TrailEnvelope(dist, column.TrailLength);
+            var envelope = envelopes[dist];
             wave = EngineConstants.RainWaveMinimum + wave * (1f - EngineConstants.RainWaveMinimum);
             var brightness = wave * envelope;
             var cursorBoost = (byte)(dist == 0 ? 1 : 0);
             var brightnessByte = (byte)Math.Clamp((int)(brightness * 255), 0, 255);
-            SetDisplayGlyph(x, y, cell.Glyph, brightnessByte, cursorBoost);
+            SetDisplayGlyph(x, y, glyph, brightnessByte, cursorBoost);
+        }
+    }
+
+    /// <summary>
+    /// A cell that stays lit keeps its glyph and changes with <see cref="EngineConstants.GlyphMutationChance"/>.
+    /// A cell that was dark last frame gets a fresh glyph.
+    /// </summary>
+    private char NextGlyph(int index)
+    {
+        // The column's other stream already drew this cell this frame: share its glyph.
+        ref readonly var current = ref _grid[index];
+        if (current.State == (byte)CellState.Glyph)
+            return current.Glyph;
+
+        ref readonly var previous = ref _previousGrid[index];
+        if (previous.State == (byte)CellState.Glyph && _rng.Next(100) >= EngineConstants.GlyphMutationChance)
+            return previous.Glyph;
+
+        return _pool.Pick(_rng);
+    }
+
+    /// <summary>
+    /// Builds the envelope table of every trail length a stream can get at this height, so streams read
+    /// <see cref="TrailEnvelope"/> from a table instead of calling MathF.Pow per cell. A table depends only on its
+    /// length, so tables from earlier sizes are kept and reused.
+    /// </summary>
+    private void EnsureEnvelopes(int minTrail, int maxTrail)
+    {
+        if (_envelopes.Length <= maxTrail)
+            Array.Resize(ref _envelopes, maxTrail + 1);
+
+        for (var length = minTrail; length <= maxTrail; length++)
+        {
+            if (_envelopes[length] is not null)
+                continue;
+
+            var table = new float[length];
+            for (var distance = 0; distance < length; distance++)
+                table[distance] = TrailEnvelope(distance, length);
+            _envelopes[length] = table;
         }
     }
 
@@ -2128,23 +2383,6 @@ internal sealed class MatrixEngine : IDisposable
         }
     }
 
-    private void ClearDisplayCells(int x, int y)
-    {
-        ref var cell = ref _grid[y * _width + x];
-        cell.State = (byte)CellState.Empty;
-        cell.Glyph = '\0';
-        cell.Brightness = 0;
-        cell.CursorBoost = 0;
-        if (_wideColumns && x + 1 < _width)
-        {
-            ref var cont = ref _grid[y * _width + x + 1];
-            cont.State = (byte)CellState.Empty;
-            cont.Glyph = '\0';
-            cont.Brightness = 0;
-            cont.CursorBoost = 0;
-        }
-    }
-
     /// <summary>Start a stream whose head enters row 0 on this frame, and schedule the column's next stream.</summary>
     private void ActivateColumn(int x, int slot)
     {
@@ -2167,18 +2405,18 @@ internal sealed class MatrixEngine : IDisposable
         _nextSpawnFrames[x] = visibleFrames + NextGapFrames(visibleFrames);
     }
 
-    private void ClearColumn(int x)
-    {
-        for (var y = 0; y < _height; y++)
-            ClearDisplayCells(x, y);
-    }
-
     public void Dispose()
     {
         if (_grid.Length > 0)
         {
             ArrayPool<Cell>.Shared.Return(_grid);
             _grid = [];
+        }
+
+        if (_previousGrid.Length > 0)
+        {
+            ArrayPool<Cell>.Shared.Return(_previousGrid);
+            _previousGrid = [];
         }
 
         if (_columns.Length > 0)
@@ -2213,7 +2451,7 @@ internal struct ColumnState
 
 internal static class TerminalSession
 {
-    internal static Action Enter(bool rawInput, bool softFont)
+    internal static Action Enter(bool rawInput, bool softFont, Action restoreCodePage)
     {
         Console.Out.Write("\u001b[?1049h\u001b[?25l");
         if (softFont)
@@ -2231,8 +2469,52 @@ internal static class TerminalSession
                 Console.Out.Write(MatrixSoftFont.UnloadSequence);
             Console.Out.Write("\u001b[?25h\u001b[?1049l");
             Console.Out.Flush();
+            // Last, so every byte above is still read as UTF-8.
+            restoreCodePage();
         };
     }
+}
+
+/// <summary>
+/// Frames are written as UTF-8 bytes, but a Windows console reads output in its code page, which defaults
+/// to the OEM code page (932 on Japanese Windows, 437 on US English). There a non-ASCII glyph such as λ shows
+/// as two garbage characters and shifts the row. The code page is set on the console, not the process,
+/// so it stays changed after exit unless it is put back.
+/// </summary>
+internal static partial class ConsoleCodePage
+{
+    private const uint Utf8 = 65001;
+
+    /// <summary>
+    /// Switches the console output code page to UTF-8. Returns false when output is not read as UTF-8.
+    /// <paramref name="restore"/> puts the original code page back. Other platforms read UTF-8 already.
+    /// </summary>
+    internal static bool TrySwitchToUtf8(out Action restore)
+    {
+        restore = static () => { };
+        if (!OperatingSystem.IsWindows())
+            return true;
+
+        // Read the code page from the console itself: Console.OutputEncoding cannot always represent
+        // an OEM code page, so restoring through it could leave the console on another one.
+        var original = GetConsoleOutputCP();
+        if (original == 0)
+            return false;
+        if (original == Utf8)
+            return true;
+        if (!SetConsoleOutputCP(Utf8))
+            return false;
+
+        restore = () => SetConsoleOutputCP(original);
+        return true;
+    }
+
+    [LibraryImport("kernel32.dll")]
+    private static partial uint GetConsoleOutputCP();
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetConsoleOutputCP(uint wCodePageID);
 }
 
 /// <summary>

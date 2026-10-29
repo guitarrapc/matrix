@@ -33,7 +33,7 @@ The grid matches **terminal display cells** (width x height), not Unicode code u
 | Mode | Anchor columns | Glyph width |
 |---|---|---|
 | ascii-matrix / single / movie (soft font) | Any | 1 cell |
-| movie (katakana) / kana | Even columns only (`0`, `2`, `4`, ...) | 2 cells (full-width) |
+| movie (katakana) / kana / single with a full-width character | Even columns only (`0`, `2`, `4`, ...) | 2 cells (full-width) |
 
 Wide glyphs use an **anchor** cell plus a **Continuation** cell to the right. Continuation cells emit **nothing** during render, not even a space.
 
@@ -66,7 +66,7 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 | `--density` | 0.0-1.0, default **0.55** (ascii-matrix / single / movie with soft font), **0.7** (movie with katakana, kana) |
 | Trail length | height x **0.30** ... **0.90** per stream, min **10** cells |
 | Fall speed | 1-2 cells/frame per stream |
-| Glyph mutation | ~35% per frame per visible stream cell |
+| Glyph mutation | Head: a new glyph every frame. Trail: ~10% per frame per cell, otherwise the cell keeps its glyph |
 | Density meaning | Fraction of the columns that can hold a stream (even columns only for katakana) that show rain at any moment. 1.0 keeps every column raining |
 | Spawn | Each column alternates stream and gap. Gaps are random, uniform in 0 ... 2 x the mean that gives the density. At 1.0 the next stream enters before the previous trail leaves |
 | Start / resize | Each column's first stream enters within the first screen height of frames, so rain falls in from the top |
@@ -84,6 +84,10 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 | **kana** | `--mode kana` | Full-width katakana-heavy mix, without the soft font check |
 
 `--char` together with `--mode movie` or `--mode kana` is a fatal error. `--char` selects single-character mode.
+
+`--char` takes only a character that draws as one glyph of its own. Controls (tab, newline), format characters (zero-width space, joiners, soft hyphen), combining marks, line and paragraph separators, and lone surrogates are fatal errors: they move the cursor, draw nothing, or draw on the previous cell, so the grid would shift.
+
+A non-ASCII `--char` needs UTF-8 output (see Windows console code page), and it is a fatal error when the terminal cannot provide it. A full-width character (East Asian Wide or Fullwidth, such as `ア` or `漢`) takes two display cells, so it uses the katakana layout: even anchor columns and a Continuation cell. Ambiguous-width characters such as `λ` count as 1 cell, as most terminals draw them.
 
 ### movie mode
 
@@ -108,11 +112,11 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 
 - The terminal is asked for its attributes (DA1). Soft fonts are used only when the reply lists attribute 7 (soft character sets) in a VT200-or-later class (first parameter 61-69).
 - Katakana is used when there is no VT output, stdin is not a tty, the reply lacks attribute 7, or no reply comes within 1 second. Older Windows Terminal draws soft fonts but replies `?1;0c`, so it gets katakana.
-- On Windows, DA1 is trusted only in Windows Terminal (`WT_SESSION`) and in a classic console window. Other terminals that host the program through ConPTY get katakana and a warning, without a query (see Lessons Learned: movie mode terminal detection).
+- On Windows, DA1 is trusted only in Windows Terminal (`WT_SESSION`) and in a classic console window. Other terminals that host the program through ConPTY get katakana and a warning, without a query. The same holds for WSL started by wsl.exe: DA1 is trusted only in Windows Terminal (see Lessons Learned: movie mode terminal detection).
 
 **Katakana rendering** (movie fallback and `--mode kana`)
 
-Requires UTF-8 output. The program attempts to set console input/output to UTF-8 and fails if the terminal cannot support it. Streams use **full-width glyphs on even columns only**, half-width characters are excluded because mixed display widths break vertical alignment.
+Requires UTF-8 output, and fails when the terminal cannot provide it (see Windows console code page). Streams use **full-width glyphs on even columns only**, half-width characters are excluded because mixed display widths break vertical alignment.
 
 Glyph mix (weighted random):
 
@@ -233,6 +237,12 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 - **Result:** scattered flicker, not film-like rain.
 - **Decision:** shift each stream down as a unit, clear cells only when they leave the segment or the stream ends. Black belongs between columns, not inside trails.
 
+### Glyph mutation
+
+- **Tried:** clear the grid every frame and redraw each stream, deciding mutation from the cleared cell.
+- **Result:** the clear also wiped the glyphs, so every lit cell picked a new glyph every frame (~98% changed instead of the mutation chance). Trails read as noise instead of rain.
+- **Decision:** keep the last frame's grid. A cell lit in both frames keeps its glyph and changes with the mutation chance. A newly lit cell gets a fresh glyph, so the Head, which always enters a cell that was dark, changes every frame.
+
 ### movie mode layout
 
 - **Tried:** mixed half-width and full-width glyphs in the same logical column.
@@ -265,6 +275,7 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 - **Symptom:** in the Claude desktop terminal panel (xterm.js, `TERM_PROGRAM=claude-desktop`), DA1 replied `?61;6;7;21;22;23;24;28;32;42c`, listing soft fonts, but the panel drew the plain ASCII codes.
 - **Cause:** on Windows, terminals other than a classic console window host programs through ConPTY. conhost sits in between and answers DA1 with its own attributes, not the hosting terminal's.
 - **Decision:** trust DA1 only when `WT_SESSION` is set or the console window is visible (a classic conhost window, which draws soft fonts itself). Under ConPTY the console window is a hidden pseudo window, so any other host gets katakana with a warning.
+- **WSL:** the same trap reached Linux. WSL started from that panel picked the soft font and drew ASCII codes, because wsl.exe also runs behind conhost and the window check exists only on Windows. A WSL process started by wsl.exe (`WSL_DISTRO_NAME` set) now trusts DA1 only with `WT_SESSION`, which Windows Terminal adds to `WSLENV` so WSL sees it. The console window cannot be checked from Linux, so WSL in a classic console window gets katakana too.
 
 ### Density and stutter
 
@@ -310,4 +321,11 @@ These are behavioral constraints, easy to get wrong in a top-origin terminal:
 - Unix input readiness uses `poll`, never `ioctl(FIONREAD)`: `ioctl` is variadic, and Apple's arm64 ABI passes variadic arguments on the stack, so a plain P/Invoke corrupts memory (`AccessViolationException` on Apple Silicon). Do not P/Invoke any variadic libc function.
 - Native calls use `[LibraryImport]`, not `[DllImport]`: the source generator emits the marshalling code at compile time, so NativeAOT needs no runtime stubs. `bool` has no default native form there, so every `bool` return and parameter states `[MarshalAs(UnmanagedType.Bool)]` (Win32 `BOOL`, 4 bytes).
 - True Color gate stays conservative: 256-color `TERM` is not enough.
-- Hot path: pre-built ANSI prefixes, pooled grid/buffers, one `Stream.Write` + `Flush` per frame, and glyph/color pools built once at startup.
+- Windows console code page: frames are UTF-8 bytes, but a Windows console reads output in its code page, which defaults to the OEM code page (932 on Japanese Windows, 437 on US English). There `λ` showed as `ﾎｻ`, two cells, and shifted every row. The console output code page is switched to UTF-8 for the run and put back on exit, last, after the terminal state. The code page belongs to the console, not the process: movie mode used to switch it without restoring, so the shell stayed on UTF-8 after exit. It is read and restored with `GetConsoleOutputCP`/`SetConsoleOutputCP`, not `Console.OutputEncoding`, which cannot always represent an OEM code page. The input code page is left alone, since keys are read through the Unicode console API. Only non-ASCII glyph modes (katakana, a non-ASCII `--char`) fail when the switch fails.
+- Testing the code page: under `dotnet run` the console already reads UTF-8 (the probe saw 65001 even after `chcp 932`), which hides the garbling. Test with the built binary started from a console on its default code page.
+- Hot path: pre-built ANSI prefixes, pooled grid/buffers, one `Stream.Write` + `Flush` per frame, and glyph/color pools built once at startup. Steady-state frames allocate nothing. Buffers are replaced only on resize, and pooled ones go back to the pool.
+- Per-cell math avoids `Math.Sin`: the rain wave takes one `SinCos` per stream and advances row by row by rotation, and dither uses an integer hash. With one contiguous grid clear per frame and direct digit writes for color sequences, frame time at 565 x 112 dropped by about 40% (about 1.2 ms to 0.7 ms). Apart from the dither noise pattern, these changes leave the rendered output as it was.
+- Per-cell output and trail math reuse precomputed work: blanks and color codes are written straight into the frame buffer (a one-byte span copy cost more than the write), true color sequences are pre-encoded per LUT entry (heads, which add the cursor bloom, still encode live), and the trail envelope comes from a table per trail length built on resize instead of a `MathF.Pow` per cell. Output bytes are unchanged, and frame time at 565 x 112 dropped from about 0.65 ms to 0.3 ms. The cost is memory: about 5 KB per palette (cycle has 48, about 260 KB), and envelope tables bounded by the tallest window seen.
+- wave computes its crest once per column per frame, and skips `Math.Exp` where the crest term is below half an ulp of the rest level, so output stays bit-identical while render time drops about 35%.
+- 16-color output reads each LUT entry's nearest name from a table built at startup (heads, which add the cursor bloom, still search live), and dedupes on the 16-color name instead of RGB, since many RGB values share one name. Render time drops about 40% and bytes about 13%, for the same screen.
+- Render buffer: sized to the most one frame can write (per cell, one foreground sequence and one glyph; per row, the cursor move, row colors, and clear to end of line). A fixed 72 bytes per cell rented 8 MB at 565 x 112 while frames peaked near 0.5 MB, the exact bound rents 2 MB. Any new per-cell or per-row sequence must raise the bound, or the frame write throws.
