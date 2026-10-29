@@ -6,7 +6,7 @@
 
 ターミナルで動く緑のコードレインです。[Matrix のデジタルレイン](https://en.wikipedia.org/wiki/Digital_rain)をターミナルで流したくて作りました。
 
-Windows、Linux、macOS で単体バイナリとして動きます。ASCII の雨、映画風の全角グリフ、True Color テーマ、Windows Terminal のピクセルシェーダーに対応しています。
+Windows、Linux、macOS で単体バイナリとして動きます。ASCII の雨、ソフトフォントで描く映画のグリフ (全角カタカナへのフォールバック付き)、True Color テーマ、Windows Terminal のピクセルシェーダーに対応しています。
 
 ![](./assets/scenario.svg)
 
@@ -35,9 +35,10 @@ matrix
 matrix 0
 matrix --duration 0
 
-# ASCII グリフ、映画風の全角グリフ、またはソフトフォントで描く映画のグリフを使います。デフォルトは ascii です。
-# real にはソフトフォント (DECDLD) 対応の端末 (Windows Terminal など) が必要です。非対応の端末では警告を出し、ASCII がそのまま表示されます。
-matrix --mode <ascii|movie|real>
+# ASCII グリフ、または映画のグリフを使います。デフォルトは ascii です。
+# movie はソフトフォント (DECDLD) 対応の端末 (Windows Terminal など) では映画のグリフを、
+# それ以外の端末では全角カタカナを表示します。
+matrix --mode <ascii|movie>
 
 # 組み込みのカラーパターンを選びます。
 matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
@@ -57,7 +58,7 @@ matrix --char "λ"
 
 ```bash
 matrix [duration]
-matrix [--duration <seconds>] [--mode <ascii|movie|real>] [--char <character>]
+matrix [--duration <seconds>] [--mode <ascii|movie>] [--char <character>]
        [--density <0.0-1.0>] [--fps <1-60>]
        [--pattern <classic|resurrections|operator|twilight|rain|rainbow>]
        [--bg <color>] [--head <color>] [--bright <color>] [--dim <color>]

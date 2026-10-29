@@ -6,7 +6,7 @@ English | [日本語](README-ja.md)
 
 Terminal-based green code rain. [Matrix](https://en.wikipedia.org/wiki/Digital_rain) is something I always wanted to have on my terminal, so I made it.
 
-It runs on Windows, Linux, and macOS as a standalone binary. It supports ASCII rain, full-width movie-style glyphs, true-color themes, and optional Windows Terminal pixel shaders.
+It runs on Windows, Linux, and macOS as a standalone binary. It supports ASCII rain, film glyphs drawn with a terminal soft font (with a full-width katakana fallback), true-color themes, and optional Windows Terminal pixel shaders.
 
 ![](./assets/scenario.svg)
 
@@ -35,9 +35,10 @@ matrix
 matrix 0
 matrix --duration 0
 
-# Use ASCII glyphs, full-width movie-style glyphs, or film glyphs drawn with a terminal soft font. Default is ascii.
-# real needs soft font (DECDLD) support, such as Windows Terminal; other terminals show plain ASCII with a warning.
-matrix --mode <ascii|movie|real>
+# Use ASCII glyphs or movie glyphs. Default is ascii.
+# movie draws the film glyphs with a terminal soft font (DECDLD) when the terminal supports it,
+# such as Windows Terminal, and full-width katakana otherwise.
+matrix --mode <ascii|movie>
 
 # Pick a built-in color pattern.
 matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
@@ -57,7 +58,7 @@ matrix --char "λ"
 
 ```bash
 matrix [duration]
-matrix [--duration <seconds>] [--mode <ascii|movie|real>] [--char <character>]
+matrix [--duration <seconds>] [--mode <ascii|movie>] [--char <character>]
        [--density <0.0-1.0>] [--fps <1-60>]
        [--pattern <classic|resurrections|operator|twilight|rain|rainbow>]
        [--bg <color>] [--head <color>] [--bright <color>] [--dim <color>]

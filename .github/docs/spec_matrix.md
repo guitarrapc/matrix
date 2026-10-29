@@ -32,12 +32,12 @@ The grid matches **terminal display cells** (width x height), not Unicode code u
 
 | Mode | Anchor columns | Glyph width |
 |---|---|---|
-| ascii-matrix / single / real | Any | 1 cell |
-| movie | Even columns only (`0`, `2`, `4`, ...) | 2 cells (full-width) |
+| ascii-matrix / single / movie (soft font) | Any | 1 cell |
+| movie (katakana) | Even columns only (`0`, `2`, `4`, ...) | 2 cells (full-width) |
 
 Wide glyphs use an **anchor** cell plus a **Continuation** cell to the right. Continuation cells emit **nothing** during render, not even a space.
 
-In movie mode, an empty anchor + Continuation pair renders as one **U+3000 IDEOGRAPHIC SPACE** instead of two ASCII spaces. A trailing odd column that cannot hold a wide glyph still renders as an ASCII space.
+In movie mode with katakana, an empty anchor + Continuation pair renders as one **U+3000 IDEOGRAPHIC SPACE** instead of two ASCII spaces. A trailing odd column that cannot hold a wide glyph still renders as an ASCII space.
 
 ### Color and brightness
 
@@ -63,11 +63,11 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 | Parameter | Value |
 |---|---|
 | FPS (`--fps`) | **14** (1-60) |
-| `--density` | 0.0-1.0; default **0.55** (ascii-matrix / single / real), **0.7** (movie) |
+| `--density` | 0.0-1.0; default **0.55** (ascii-matrix / single / movie with soft font), **0.7** (movie with katakana) |
 | Trail length | height x **0.30** ... **0.90** per stream, min **10** cells |
 | Fall speed | 1-2 cells/frame per stream |
 | Glyph mutation | ~35% per frame per visible stream cell |
-| Movie density | effective density x **1.5** (cap 1.0) |
+| Movie (katakana) density | effective density x **1.5** (cap 1.0), because only even columns hold glyphs |
 | Initial active columns | effective density x **90%** at start / resize |
 | Spawn | Adaptive baseline with headroom; raised when active columns fall below target |
 | New stream trail length | Adaptive, up to **+35%** when active columns are below target |
@@ -82,14 +82,40 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 |---|---|---|
 | **ascii-matrix** (default) | none or `--mode ascii` | ASCII letters, digits, symbols |
 | **single** | `--char X` | One user character |
-| **movie** | `--mode movie` | Full-width katakana-heavy mix |
-| **real** | `--mode real` | Film glyphs (mirrored katakana, digits, symbols) from a soft font |
+| **movie** | `--mode movie` | Film glyphs from a soft font, or a full-width katakana-heavy mix |
 
-`--char` together with `--mode movie` or `--mode real` is a fatal error. `--char` selects single-character mode.
+`--char` and `--mode movie` together are a fatal error. `--char` selects single-character mode.
 
-**movie** requires UTF-8 output. The program attempts to set console input/output to UTF-8 and fails if the terminal cannot support it. Movie streams use **full-width glyphs on even columns only**; half-width characters are excluded because mixed display widths break vertical alignment.
+### movie mode
 
-**movie** glyph mix (weighted random):
+**movie** aims at the glyphs seen in the films, which Unicode cannot express (many are mirrored katakana and digits), **without installing or shipping a font**. At startup it picks one of two renderings:
+
+| Rendering | When | Glyphs |
+|---|---|---|
+| Soft font | The terminal confirms soft font (DECDLD) support | 55 film glyphs, 1 cell wide |
+| Katakana | Otherwise, without a warning | Full-width katakana, marks, symbols |
+
+There is no option to force either rendering. The katakana fallback still looks like the film, so a missed detection costs little.
+
+**Soft font rendering**
+
+- The glyphs are sent to the terminal as a **DECDLD soft font** (DRCS) when the rain starts, mapped onto G0, and G0 is set back to ASCII on exit. The font exists only in that terminal session.
+- Streams emit ASCII codes `0x21` and up; the terminal draws each code with its soft-font glyph. SGR colors apply as usual, so every color pattern works.
+- 55 glyphs, each a 12 x 24 one-bit bitmap embedded in the binary. They are rasterized from `Matrix-Code.ttf` by Rezmason (MIT License, see `THIRD_PARTY_NOTICES.md`).
+- Glyphs are 1 cell wide, so streams use every column like ascii-matrix, and UTF-8 is not needed.
+- Terminals with soft font support include Windows Terminal, xterm with a VT340 terminal ID, mlterm, and RLogin. iTerm2, kitty, Alacritty, GNOME Terminal, and macOS Terminal lack it.
+
+**Detection**
+
+- The terminal is asked for its attributes (DA1). Soft fonts are used only when the reply lists attribute 7 (soft character sets) in a VT200-or-later class (first parameter 61-69).
+- Katakana is used when there is no VT output, stdin is not a tty, the reply lacks attribute 7, or no reply comes within 1 second. Older Windows Terminal draws soft fonts but replies `?1;0c`, so it gets katakana.
+- On Windows, DA1 is trusted only in Windows Terminal (`WT_SESSION`) and in a classic console window. Other terminals that host the program through ConPTY get katakana without a query (see Lessons Learned: movie mode terminal detection).
+
+**Katakana rendering**
+
+Requires UTF-8 output. The program attempts to set console input/output to UTF-8 and fails if the terminal cannot support it. Streams use **full-width glyphs on even columns only**; half-width characters are excluded because mixed display widths break vertical alignment.
+
+Glyph mix (weighted random):
 
 | Pool | Contents | Share |
 |---|---|---|
@@ -99,17 +125,6 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 
 Every movie glyph stays within **U+3000-U+30FF** (see Lessons Learned: movie mode font fallback stutter).
 
-**real** draws the glyphs seen in the films, which Unicode cannot express (many are mirrored katakana and digits). The goal is film-accurate glyphs **without installing or shipping a font**.
-
-- The glyphs are sent to the terminal as a **DECDLD soft font** (DRCS) when the rain starts, mapped onto G0, and G0 is set back to ASCII on exit. The font exists only in that terminal session.
-- Streams emit ASCII codes `0x21` and up; the terminal draws each code with its soft-font glyph. SGR colors apply as usual, so every color pattern works.
-- 55 glyphs, each a 12 x 24 one-bit bitmap embedded in the binary. They are rasterized from `Matrix-Code.ttf` by Rezmason (MIT License, see `THIRD_PARTY_NOTICES.md`).
-- Glyphs are 1 cell wide, so real mode uses every column like ascii-matrix and needs no UTF-8.
-- Requires soft font support: Windows Terminal, xterm with a VT340 terminal ID, mlterm, and RLogin. Terminals without it (iTerm2, kitty, Alacritty, GNOME Terminal, macOS Terminal) show the plain ASCII codes instead.
-- At startup the terminal is asked for its attributes (DA1). When it does not list soft fonts (attribute 7), does not answer within 1 second, or cannot be asked, a warning goes to stderr and the rain still runs. It is only a warning because some terminals draw soft fonts without listing them (older Windows Terminal replies `?1;0c`).
-- On Windows, DA1 is trusted only in Windows Terminal (`WT_SESSION`) and in a classic console window. Other terminals that host the program through ConPTY get a warning without a query (see Lessons Learned: real mode terminal detection).
-- Fails when the console cannot enable VT processing.
-
 ---
 
 ## Command-Line Interface
@@ -118,7 +133,7 @@ Every movie glyph stays within **U+3000-U+30FF** (see Lessons Learned: movie mod
 matrix [duration]
 matrix --duration <seconds>
 matrix --char <character>
-matrix --mode <ascii|movie|real>
+matrix --mode <ascii|movie>
 matrix --density <0.0-1.0>
 matrix --fps <1-60>
 matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow>
@@ -225,19 +240,20 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 - **Decision:** limit the movie pool to U+3000-U+30FF (katakana, marks, symbols). On the 5120 x 2160 screen at 30 FPS the render thread dropped from 91-94% to 30-36% CPU, and the present rate rose from about 11 FPS to the same rate as ascii.
 - **Pitfall:** do not reintroduce ASCII spaces inside movie rows, or glyphs outside U+3000-U+30FF. Look-alikes in other blocks (Suzhou numerals `〡`-`〩`, Kangxi radicals, enclosed CJK) also split runs or fall back to other fonts. Each fallback glyph still costs more to shape than an ASCII glyph, so movie mode has less headroom than ascii.
 
-### real mode glyph source
+### movie mode soft font
 
 - **Rejected:** switching the terminal font only while the program runs. Windows Terminal has no escape sequence for the font face, conhost (`SetCurrentConsoleFontEx`) accepts only installed fonts, and `AddFontResourceEx(FR_PRIVATE)` registers a font only for the calling process, not for the terminal process that draws the text. xterm (OSC 50) and iTerm2 (`SetProfile`) have their own sequences, but no sequence works across terminals.
 - **Rejected:** Unicode look-alikes. Mirrored katakana do not exist in Unicode, and non-ASCII glyphs bring back font fallback costs.
 - **Rejected:** drawing the screen as images (Sixel, kitty graphics) or as braille or block pixel art. Images are heavy at 14-60 FPS, and pixel art needs 2-3 cells per glyph.
 - **Decision:** DECDLD soft font. It is a VT220-era standard, supported by Windows Terminal, and the output stays ASCII.
+- **Tried:** a separate `--mode real` that always used the soft font and warned when support was not confirmed. Unsupported terminals then showed ASCII symbols, which is worse than katakana. **Decision:** `--mode movie` picks the soft font only on a confirmed DA1 reply and silently falls back to katakana; `--mode real` was removed.
 - **Glyph scaling:** `Matrix-Code.ttf` glyphs are about as wide as they are tall. Scaling them uniformly into a 12 x 24 cell left them 8 pixels tall, so width and height are scaled separately to a 10 x 16 box. The box size comes from the katakana only; the vertical bar and `¦` are taller and would shrink every glyph.
 
-### real mode terminal detection
+### movie mode terminal detection
 
 - **Symptom:** in the Claude desktop terminal panel (xterm.js, `TERM_PROGRAM=claude-desktop`), DA1 replied `?61;6;7;21;22;23;24;28;32;42c`, listing soft fonts, but the panel drew the plain ASCII codes.
 - **Cause:** on Windows, terminals other than a classic console window host programs through ConPTY. conhost sits in between and answers DA1 with its own attributes, not the hosting terminal's.
-- **Decision:** trust DA1 only when `WT_SESSION` is set or the console window is visible (a classic conhost window, which draws soft fonts itself). Under ConPTY the console window is a hidden pseudo window, so any other host gets a warning that support cannot be checked.
+- **Decision:** trust DA1 only when `WT_SESSION` is set or the console window is visible (a classic conhost window, which draws soft fonts itself). Under ConPTY the console window is a hidden pseudo window, so any other host gets katakana.
 
 ### Density and stutter
 

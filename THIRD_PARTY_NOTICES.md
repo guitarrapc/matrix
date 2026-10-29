@@ -2,7 +2,7 @@
 
 ## Rezmason/matrix
 
-The glyph bitmaps used by `--mode real` are rasterized from `Matrix-Code.ttf` in [Rezmason/matrix](https://github.com/Rezmason/matrix).
+The soft font glyph bitmaps used by `--mode movie` are rasterized from `Matrix-Code.ttf` in [Rezmason/matrix](https://github.com/Rezmason/matrix).
 
 ```text
 MIT License
