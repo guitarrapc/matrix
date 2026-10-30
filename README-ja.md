@@ -10,7 +10,7 @@ Windows、Linux、macOS で単体バイナリとして動きます。ASCII の�
 
 ![](./assets/scenario.svg)
 
-| Shader | Shaderless (True-color) | ASCII |
+| Shader | Shaderless (True-color) | kana |
 | --- | --- | --- |
 | ![](./assets/classic_shader.png) | ![](./assets/classic_shaderless.png) | ![](./assets/classic_ascii.png) |
 
@@ -64,7 +64,7 @@ matrix --char "ア"
 ```bash
 matrix [duration]
 matrix [--duration <seconds>] [--mode <ascii|movie|kana>] [--char <character>]
-       [--density <0.0-1.0>] [--fps <1-60>]
+       [--density <0.0-1.0>] [--fps <1-60>] [--soft-font]
        [--pattern <classic|resurrections|operator|twilight|rain|rainbow|fire|cycle|pulse|wave>]
        [--bg <color>] [--head <color>] [--bright <color>] [--dim <color>]
        [--cursor-intensity <0.5-5.0>]

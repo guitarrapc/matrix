@@ -1,7 +1,7 @@
 ﻿# scenetake starter scenario. Edit the values below and add commands under steps.
 title: "matrix"
-width: 80
-height: 25
+width: 100
+height: 30
 shell: bash
 
 settings:
@@ -14,5 +14,5 @@ settings:
   stderr-color: red
 
 steps:
-  - run: matrix 5
+  - run: matrix 5 --mode movie --soft-font
     pty: true
