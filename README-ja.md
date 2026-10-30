@@ -40,6 +40,10 @@ matrix --duration 0
 # それ以外の端末では警告を出し、kana と同じ全角カタカナで表示します。
 matrix --mode <ascii|movie|kana>
 
+# 端末を確かめずにソフトフォントを使います。ソフトフォントを描画できる録画ツール (scenetake) のように、
+# 確認できない端末向けです。ソフトフォント非対応の端末では ASCII 記号が表示されます。
+matrix --mode movie --soft-font
+
 # 組み込みのカラーパターンを選びます。
 matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow|fire|cycle|pulse|wave>
 

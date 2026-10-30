@@ -40,6 +40,10 @@ matrix --duration 0
 # such as Windows Terminal. Otherwise it warns and falls back to the same katakana as kana.
 matrix --mode <ascii|movie|kana>
 
+# Use the soft font without checking the terminal, for terminals the check cannot see,
+# such as a recorder that draws soft fonts (scenetake). A terminal without soft fonts shows ASCII symbols.
+matrix --mode movie --soft-font
+
 # Pick a built-in color pattern.
 matrix --pattern <classic|resurrections|operator|twilight|rain|rainbow|fire|cycle|pulse|wave>
 
