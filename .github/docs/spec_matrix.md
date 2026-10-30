@@ -80,10 +80,10 @@ True Color terminals use 24-bit ANSI. Other terminals fall back to the nearest 1
 |---|---|---|
 | **ascii-matrix** (default) | none or `--mode ascii` | ASCII letters, digits, symbols |
 | **single** | `--char X` | One user character |
-| **movie** | `--mode movie` | Film glyphs from a soft font, or a full-width katakana-heavy mix |
+| **movie** | `--mode movie` (`--soft-font` skips the soft font check) | Film glyphs from a soft font, or a full-width katakana-heavy mix |
 | **kana** | `--mode kana` | Full-width katakana-heavy mix, without the soft font check |
 
-`--char` together with `--mode movie` or `--mode kana` is a fatal error. `--char` selects single-character mode.
+`--char` together with `--mode movie` or `--mode kana` is a fatal error. `--char` selects single-character mode. `--soft-font` without `--mode movie` is a fatal error too, because no other mode has a soft font and an ignored flag would hide a mistyped mode.
 
 `--char` takes only a character that draws as one glyph of its own. Controls (tab, newline), format characters (zero-width space, joiners, soft hyphen), combining marks, line and paragraph separators, and lone surrogates are fatal errors: they move the cursor, draw nothing, or draw on the previous cell, so the grid would shift.
 
@@ -95,10 +95,16 @@ A non-ASCII `--char` needs UTF-8 output (see Windows console code page), and it 
 
 | Rendering | When | Glyphs |
 |---|---|---|
-| Soft font | The terminal confirms soft font (DECDLD) support | 55 film glyphs, 1 cell wide |
+| Soft font | The terminal confirms soft font (DECDLD) support, or `--soft-font` is given | 55 film glyphs, 1 cell wide |
 | Katakana | Otherwise, with a stderr warning that names the reason | Full-width katakana, marks, symbols |
 
-`--mode kana` always uses the katakana rendering, skips the check, and prints no warning. It is for terminals where the check is wrong or slow, and for people who prefer the katakana look. There is no option to force the soft font: on a terminal without support it shows ASCII symbols, which is worse than katakana.
+`--mode kana` always uses the katakana rendering, skips the check, and prints no warning. It is for terminals where the check is wrong or slow, and for people who prefer the katakana look.
+
+`--soft-font` uses the soft font without the check. It is for terminals that draw soft fonts where the check cannot see it:
+- a recorder behind a pseudo terminal, such as [scenetake](https://github.com/guitarrapc/scenetake), where the Windows console host answers DA1 or nothing answers it;
+- a terminal that answers DA1 without attribute 7, such as older Windows Terminal.
+
+The user who gives it knows the terminal; matrix knows no terminal or recorder by name for it. A terminal without soft fonts then shows ASCII symbols, which is why the check stays the default. Only VT output is still required, because the font is sent as VT sequences.
 
 **Soft font rendering**
 
@@ -111,7 +117,8 @@ A non-ASCII `--char` needs UTF-8 output (see Windows console code page), and it 
 **Detection**
 
 - The terminal is asked for its attributes (DA1). Soft fonts are used only when the reply lists attribute 7 (soft character sets) in a VT200-or-later class (first parameter 61-69).
-- Katakana is used when there is no VT output, stdin is not a tty, the reply lacks attribute 7, or no reply comes within 1 second. Older Windows Terminal draws soft fonts but replies `?1;0c`, so it gets katakana.
+- Katakana is used when there is no VT output, stdin is not a tty, the reply lacks attribute 7, or no reply comes within 1 second. Older Windows Terminal draws soft fonts but replies `?1;0c`, so it gets katakana unless `--soft-font` is given.
+- The warning names `--soft-font` and `--mode kana`, so a user whose terminal does draw soft fonts can find the flag.
 - On Windows, DA1 is trusted only in Windows Terminal (`WT_SESSION`) and in a classic console window. Other terminals that host the program through ConPTY get katakana and a warning, without a query. The same holds for WSL started by wsl.exe: DA1 is trusted only in Windows Terminal (see Lessons Learned: movie mode terminal detection).
 
 **Katakana rendering** (movie fallback and `--mode kana`)
@@ -276,6 +283,11 @@ Decisions and pitfalls discovered during implementation. **Do not revert these w
 - **Cause:** on Windows, terminals other than a classic console window host programs through ConPTY. conhost sits in between and answers DA1 with its own attributes, not the hosting terminal's.
 - **Decision:** trust DA1 only when `WT_SESSION` is set or the console window is visible (a classic conhost window, which draws soft fonts itself). Under ConPTY the console window is a hidden pseudo window, so any other host gets katakana with a warning.
 - **WSL:** the same trap reached Linux. WSL started from that panel picked the soft font and drew ASCII codes, because wsl.exe also runs behind conhost and the window check exists only on Windows. A WSL process started by wsl.exe (`WSL_DISTRO_NAME` set) now trusts DA1 only with `WT_SESSION`, which Windows Terminal adds to `WSLENV` so WSL sees it. The console window cannot be checked from Linux, so WSL in a classic console window gets katakana too.
+- **Recorders:** a [scenetake](https://github.com/guitarrapc/scenetake) recording drew katakana, although scenetake renders soft fonts. The program sees scenetake's pseudo terminal, not a terminal that draws. On Windows the in-box ConPTY answers DA1 itself and its console window is hidden, so the ConPTY rule above applied. On Unix nothing answers DA1, so the query timed out after 1 second.
+  - **Rejected:** sending the soft font first and falling back to katakana when it fails. A terminal that does not know DECDLD drops the string and draws the plain ASCII codes without any error. A later query cannot tell either: the cursor advances one cell both ways, and behind ConPTY conhost answers queries from its own state. Without a failure signal, "try first" is "always use the soft font", which `--mode real` already showed to be wrong.
+  - **Rejected:** using the soft font when the check cannot answer (no DA1 reply, or behind ConPTY). That case is mostly VS Code and other xterm.js hosts, which cannot draw soft fonts, so they would show ASCII symbols.
+  - **Rejected:** recognizing scenetake by an environment variable it sets (`TERM_PROGRAM=scenetake`). It worked on Windows and in WSL, but it made matrix depend on one recorder by name.
+  - **Decision:** `--soft-font` skips the check. Whoever runs matrix knows whether their terminal draws soft fonts, and matrix stays free of terminal names for it. Recorded with `--mode movie --soft-font` under scenetake on Windows 11 and in WSL (Ubuntu 24.04), both without `WT_SESSION`, the cast held the DECDLD string and the SVG the film glyphs.
 
 ### Density and stutter
 

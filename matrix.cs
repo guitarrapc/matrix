@@ -56,13 +56,14 @@ else if (colorMode == TerminalColorMode.None)
     Console.Error.WriteLine("warning: ANSI color not supported. falling back to colorless ASCII output");
 }
 
-// Movie mode draws the film glyphs with a soft font when the terminal confirms support,
-// and otherwise falls back to full-width katakana with a warning. --mode kana skips the check.
+// Movie mode draws the film glyphs with a soft font when the terminal confirms support, or without the check
+// when --soft-font says the terminal draws them, and otherwise falls back to full-width katakana with a warning.
+// --mode kana skips the check.
 var glyphMode = options.Mode;
 var density = options.Density;
 if (glyphMode == GlyphMode.Movie && options.ProbeSoftFont)
 {
-    if (TerminalCapabilities.CanUseSoftFont(colorMode, out var fallbackReason))
+    if (TerminalCapabilities.CanUseSoftFont(colorMode, options.ForceSoftFont, out var fallbackReason))
     {
         glyphMode = GlyphMode.MovieSoftFont;
         if (!options.DensityExplicit)
@@ -72,7 +73,9 @@ if (glyphMode == GlyphMode.Movie && options.ProbeSoftFont)
     {
         Console.Error.Write("warning: ");
         Console.Error.Write(fallbackReason);
-        Console.Error.WriteLine(". falling back to katakana glyphs (use --mode kana to skip this check)");
+        Console.Error.WriteLine(options.ForceSoftFont
+            ? ". falling back to katakana glyphs"
+            : ". falling back to katakana glyphs (use --soft-font if the terminal draws soft fonts, or --mode kana to skip this check)");
     }
 }
 
@@ -289,6 +292,11 @@ internal sealed class CliOptions
     internal GlyphMode Mode { get; private init; } = GlyphMode.AsciiMatrix;
     /// <summary>True for --mode movie (try the soft font); false for --mode kana (katakana only).</summary>
     internal bool ProbeSoftFont { get; private init; }
+    /// <summary>
+    /// True for --soft-font: --mode movie uses the soft font without asking the terminal. It is for terminals
+    /// whose support the check cannot see, such as a recorder behind a pseudo terminal or one that answers DA1 wrongly.
+    /// </summary>
+    internal bool ForceSoftFont { get; private init; }
     internal char SingleChar { get; private init; } = '0';
     internal double DurationSeconds { get; private init; } = 5;
     internal bool ShowHelp { get; private init; }
@@ -306,6 +314,7 @@ internal sealed class CliOptions
         var mode = GlyphMode.AsciiMatrix;
         var poolMode = GlyphMode.AsciiMatrix;
         var probeSoftFont = false;
+        var forceSoftFont = false;
         var modeName = "ascii";
         var hasChar = false;
         var singleChar = '0';
@@ -351,6 +360,9 @@ internal sealed class CliOptions
                     {
                         return Error("unknown --mode value (expected 'ascii', 'movie', or 'kana')");
                     }
+                    break;
+                case "--soft-font":
+                    forceSoftFont = true;
                     break;
                 case "--char":
                     if (++i >= args.Length)
@@ -435,6 +447,10 @@ internal sealed class CliOptions
         if (hasChar && poolMode == GlyphMode.Movie)
             return Error($"--char and --mode {modeName} cannot be used together");
 
+        // Only movie mode has a soft font. Ignoring the flag elsewhere would hide a mistyped mode.
+        if (forceSoftFont && (hasChar || poolMode != GlyphMode.Movie || !probeSoftFont))
+            return Error("--soft-font requires --mode movie");
+
         if (hasDurationFlag && hasPositionalDuration)
             return Error("specify duration either as a positional argument or via --duration, not both");
 
@@ -456,6 +472,7 @@ internal sealed class CliOptions
             Density = density,
             DensityExplicit = hasDensityFlag,
             ProbeSoftFont = mode == GlyphMode.Movie && probeSoftFont,
+            ForceSoftFont = forceSoftFont,
             CursorIntensity = cursorIntensity,
             Fps = fps,
             Colors = colors,
@@ -867,10 +884,12 @@ internal static partial class TerminalCapabilities
     }
 
     /// <summary>
-    /// True only when the terminal confirms soft font (DECDLD) support. Otherwise returns false with
-    /// the reason: no VT output, stdin not a tty, a ConPTY host other than Windows Terminal, or no DA1 reply.
+    /// True only when the terminal confirms soft font (DECDLD) support, or when <paramref name="skipCheck"/>
+    /// (--soft-font) says it draws them. Otherwise returns false with the reason: no VT output, stdin not a tty,
+    /// a ConPTY host other than Windows Terminal, or no DA1 reply. The soft font is sent as VT sequences, so
+    /// VT output is needed either way.
     /// </summary>
-    internal static bool CanUseSoftFont(TerminalColorMode colorMode, out string reason)
+    internal static bool CanUseSoftFont(TerminalColorMode colorMode, bool skipCheck, out string reason)
     {
         reason = string.Empty;
         if (colorMode == TerminalColorMode.None)
@@ -878,6 +897,9 @@ internal static partial class TerminalCapabilities
             reason = "VT output is not available";
             return false;
         }
+
+        if (skipCheck)
+            return true;
 
         if (Console.IsInputRedirected)
         {
@@ -2834,7 +2856,7 @@ Usage:
   matrix --duration <seconds>
   matrix --char <character>
   matrix --mode ascii
-  matrix --mode movie
+  matrix --mode movie [--soft-font]
   matrix --mode kana
   matrix --density <0.0-1.0>
   matrix --fps <1-60>
@@ -2857,6 +2879,9 @@ Modes:
                 Terminal. Otherwise warns and falls back to the kana pool.
   --mode kana   full-width katakana with Japanese marks and symbols, without the soft
                 font check (UTF-8 required)
+  --soft-font   with --mode movie, use the soft font without asking the terminal, for
+                terminals the check cannot see, such as a recorder that draws soft fonts.
+                A terminal without soft fonts then shows ASCII symbols.
 
 Density:
   --density     Rain density from 0.0 (sparse) to 1.0 (dense). Default 0.55.
@@ -2901,6 +2926,7 @@ Examples:
   matrix --fps 24
   matrix --mode movie --fps 7
   matrix --mode kana
+  matrix --mode movie --soft-font
   matrix --pattern resurrections
   matrix --pattern rain
   matrix --pattern rainbow --bg #050505
